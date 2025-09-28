@@ -71,79 +71,53 @@ class LatentHybridInverter:
     FUNCTION = "hybrid_invert"
     CATEGORY = "Qwen/Sampling"
 
-    def hybrid_invert(self, model, latent_image, positive, steps, strength, blend_factor, inverter_seed, forward_diffusion_seed, velocity_amplification, velocity_perturb_strength, internal_precision, normalize_output):
+    def hybrid_invert(self, model, latent_image, positive, steps, strength,
+                      blend_factor, inverter_seed, forward_diffusion_seed,
+                      velocity_amplification, velocity_perturb_strength,
+                      internal_precision, normalize_output):
         if strength == 0.0:
             return (latent_image,)
 
         device = comfy.model_management.get_torch_device()
         native_dtype = comfy.model_management.unet_dtype()
-        autocast_dtype = torch.bfloat16 if internal_precision == "bfloat16" and torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32 if internal_precision == "force_float32" else torch.float16
 
-        clean_latent = latent_image["samples"].clone().to(device, native_dtype)
-        context = positive[0][0].to(device, native_dtype)
-        qwen_transformer = model.model.diffusion_model
-        comfy.model_management.load_models_gpu([model])
+        inverter_node = QwenRectifiedFlowInverter()
+        inverted_latent, = inverter_node.invert(
+            model=model,
+            latent_image=latent_image,
+            positive=positive,
+            seed=inverter_seed,
+            steps=steps,
+            inversion_strength=strength,
+            velocity_amplification=velocity_amplification,
+            velocity_perturb_strength=velocity_perturb_strength,
+            internal_precision=internal_precision,
+            normalize_output=normalize_output,
+        )
 
-        # --- PASS 1: CREATIVE INVERSION ---
-        inversion_steps = max(1, int(steps * strength))
+        diffusion_node = LatentForwardDiffusion()
+        forward_latent, = diffusion_node.add_scheduled_noise(
+            model=model,
+            latent=latent_image,
+            seed=forward_diffusion_seed,
+            steps=steps,
+            noise_strength=strength,
+        )
 
-        # --- PROGRESS BAR INTEGRATION ---
-        pbar = comfy.utils.ProgressBar(inversion_steps)
-        # --------------------------------
+        inverted_samples = inverted_latent["samples"].to(device, native_dtype)
+        forward_samples = forward_latent["samples"].to(device, native_dtype)
 
-        end_t = strength
-        timesteps = torch.linspace(0, end_t, inversion_steps + 1, device=device, dtype=native_dtype)
-        x_t_inverted = clean_latent.unsqueeze(2) if clean_latent.dim() == 4 else clean_latent
+        if inverted_samples.dim() == 5 and forward_samples.dim() == 4:
+            forward_samples = forward_samples.unsqueeze(2)
+        elif inverted_samples.dim() == 4 and forward_samples.dim() == 5:
+            inverted_samples = inverted_samples.unsqueeze(2)
 
-        with torch.no_grad():
-            for i in range(inversion_steps):
-                t_current, t_next = timesteps[i], timesteps[i+1]
-                t_current_b = torch.full((x_t_inverted.shape[0],), t_current, device=device, dtype=native_dtype)
-                with torch.autocast(device_type="cuda", dtype=autocast_dtype):
-                    predicted_velocity = qwen_transformer(x=x_t_inverted, timestep=t_current_b, context=context, attention_mask=None)
-                if predicted_velocity.dim() == 4: predicted_velocity = predicted_velocity.unsqueeze(2)
-                if velocity_amplification != 0.0: predicted_velocity *= (1.0 + velocity_amplification)
-                if velocity_perturb_strength > 0:
-                    step_seed = inverter_seed + i
-                    generator = torch.Generator(device=device).manual_seed(step_seed)
-                    velocity_std = torch.std(predicted_velocity)
-                    noise = torch.randn(predicted_velocity.shape, generator=generator, device=device, dtype=native_dtype)
-                    predicted_velocity += noise * velocity_std * velocity_perturb_strength
-                dt = t_next - t_current
-                x_t_inverted += predicted_velocity * dt
-                if torch.isnan(x_t_inverted).any():
-                    print(f"!!! NaN in Inverter Pass. Stopping. !!!"); x_t_inverted.fill_(0); break
-
-                # --- PROGRESS BAR INTEGRATION ---
-                pbar.update(1)
-                # --------------------------------
-
-        if normalize_output == "enable":
-            for i in range(x_t_inverted.shape[0]):
-                item = x_t_inverted[i]
-                mean, std = torch.mean(item), torch.std(item)
-                if std > 1e-5: x_t_inverted[i] = (item - mean) / std
-                else: x_t_inverted[i] = item - mean
-
-        # --- PASS 2: STABLE FORWARD DIFFUSION ---
-        sampler = comfy.samplers.KSampler(model, steps=steps, device=device)
-        sigmas = sampler.sigmas
-        start_step = steps - int(steps * strength)
-        if start_step >= len(sigmas): start_step = len(sigmas) - 1
-        sigma = sigmas[start_step].to(device)
-        generator = torch.Generator(device=device).manual_seed(forward_diffusion_seed)
-        noise = torch.randn(clean_latent.shape, generator=generator, device=device, dtype=native_dtype)
-        if x_t_inverted.dim() == 5 and noise.dim() == 4:
-            noise = noise.unsqueeze(2)
-        x_t_ideal = clean_latent + noise * sigma
-
-        # --- PASS 3: SLERP BLEND ---
         if blend_factor == 0.0:
-            final_latent = x_t_ideal
+            final_latent = forward_samples
         elif blend_factor == 1.0:
-            final_latent = x_t_inverted
+            final_latent = inverted_samples
         else:
-            final_latent = slerp(blend_factor, x_t_ideal, x_t_inverted)
+            final_latent = slerp(blend_factor, forward_samples, inverted_samples)
 
         out = latent_image.copy()
         out["samples"] = final_latent.cpu()
@@ -185,9 +159,6 @@ class QwenRectifiedFlowInverter:
     CATEGORY = "Qwen/Sampling"
         
     def invert(self, model, latent_image, positive, seed, steps, inversion_strength, velocity_amplification, velocity_perturb_strength, internal_precision, normalize_output):
-        # For simplicity in the function signature, we'll get debug_print from kwargs if it exists
-        debug_print = "disable" # Not including in UI for final version to keep it clean
-
         if inversion_strength == 0.0:
             return (latent_image,)
 
@@ -251,9 +222,7 @@ class QwenRectifiedFlowInverter:
                 x_t = x_t + predicted_velocity * dt
 
                 if torch.isnan(x_t).any():
-                    print(f"!!! NaN detected at step {i+1}. Stopping inversion. !!!")
-                    x_t.fill_(0) 
-                    break
+                    raise RuntimeError("NaN detected at step %s. Increase the precision setting." % (i+1))
                 
                 pbar.update(1)
         
