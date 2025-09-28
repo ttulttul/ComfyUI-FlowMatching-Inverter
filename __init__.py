@@ -7,33 +7,45 @@ import torchvision.transforms.functional as TF
 
 def slerp(val, low, high):
     """
-    Spherical Linear Interpolation for PyTorch tensors, adapted for latents.
-    This is a more 'natural' way to blend for high-dimensional spaces.
-    Handles 4D or 5D tensors by flattening them for the operation.
+    Robust, batch-aware Spherical Linear Interpolation for PyTorch tensors.
     """
-    # Get original shape and flatten the tensors
-    original_shape = low.shape
-    low = low.flatten()
-    high = high.flatten()
+    dims = low.shape
 
-    # Normalize the vectors to be unit vectors
-    low_norm = F.normalize(low, p=2, dim=0)
-    high_norm = F.normalize(high, p=2, dim=0)
+    # Reshape to handle batches correctly
+    low = low.reshape(dims[0], -1)
+    high = high.reshape(dims[0], -1)
 
-    # Calculate the angle between the vectors
-    omega = torch.acos((low_norm * high_norm).sum())
+    low_norm = F.normalize(low, p=2, dim=1)
+    high_norm = F.normalize(high, p=2, dim=1)
 
-    # Handle the case where vectors are very close
-    if omega.abs().item() < 1e-3:
-        return low.reshape(original_shape) * (1.0 - val) + high.reshape(original_shape) * val
+    # In case we divide by zero
+    low_norm[torch.isnan(low_norm)] = 0.0
+    high_norm[torch.isnan(high_norm)] = 0.0
 
+    omega = torch.acos((low_norm * high_norm).sum(1))
     so = torch.sin(omega)
 
-    # Perform the SLERP interpolation
-    res = (torch.sin((1.0 - val) * omega) / so) * low + (torch.sin(val * omega) / so) * high
+    # This handles the case where the angle is very small
+    # and prevents division by zero.
+    cond = so > 1e-3
 
-    # Reshape back to the original tensor shape
-    return res.reshape(original_shape)
+    res = torch.zeros_like(low)
+
+    # For items where the angle is large enough, do SLERP
+    if cond.any():
+        omega_cond = omega[cond].unsqueeze(1)
+        so_cond = so[cond].unsqueeze(1)
+
+        term1 = (torch.sin((1.0 - val) * omega_cond) / so_cond) * low[cond]
+        term2 = (torch.sin(val * omega_cond) / so_cond) * high[cond]
+        res[cond] = term1 + term2
+
+    # For items where the angle is too small, do linear interpolation
+    if not cond.all():
+        res[~cond] = (1.0 - val) * low[~cond] + val * high[~cond]
+    # --- END FIX ---
+
+    return res.reshape(dims)
 
 class LatentHybridInverter:
     @classmethod
@@ -74,6 +86,11 @@ class LatentHybridInverter:
 
         # --- PASS 1: CREATIVE INVERSION ---
         inversion_steps = max(1, int(steps * strength))
+
+        # --- PROGRESS BAR INTEGRATION ---
+        pbar = comfy.utils.ProgressBar(inversion_steps)
+        # --------------------------------
+
         end_t = strength
         timesteps = torch.linspace(0, end_t, inversion_steps + 1, device=device, dtype=native_dtype)
         x_t_inverted = clean_latent.unsqueeze(2) if clean_latent.dim() == 4 else clean_latent
@@ -97,6 +114,10 @@ class LatentHybridInverter:
                 if torch.isnan(x_t_inverted).any():
                     print(f"!!! NaN in Inverter Pass. Stopping. !!!"); x_t_inverted.fill_(0); break
 
+                # --- PROGRESS BAR INTEGRATION ---
+                pbar.update(1)
+                # --------------------------------
+
         if normalize_output == "enable":
             for i in range(x_t_inverted.shape[0]):
                 item = x_t_inverted[i]
@@ -112,13 +133,11 @@ class LatentHybridInverter:
         sigma = sigmas[start_step].to(device)
         generator = torch.Generator(device=device).manual_seed(forward_diffusion_seed)
         noise = torch.randn(clean_latent.shape, generator=generator, device=device, dtype=native_dtype)
-        # We need to unsqueeze noise to 5D to match the inverter output if needed
         if x_t_inverted.dim() == 5 and noise.dim() == 4:
             noise = noise.unsqueeze(2)
         x_t_ideal = clean_latent + noise * sigma
 
         # --- PASS 3: SLERP BLEND ---
-        # If blend_factor is 0, just use the stable latent; if 1, use the creative one.
         if blend_factor == 0.0:
             final_latent = x_t_ideal
         elif blend_factor == 1.0:
@@ -129,6 +148,7 @@ class LatentHybridInverter:
         out = latent_image.copy()
         out["samples"] = final_latent.cpu()
         return (out, )
+
 
 class QwenRectifiedFlowInverter:
     @classmethod
