@@ -622,6 +622,104 @@ class ConditioningGaussianBlur:
         return tensor.dtype
 
 
+class ConditioningFrequencySplit:
+    """Separates conditioning embeddings into low/high bands via Gaussian smoothing."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "sigma": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "step": 0.05,
+                    "tooltip": "Cutoff for the Gaussian low-pass applied along the token axis."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("low_pass", "high_pass")
+    FUNCTION = "split"
+    CATEGORY = "conditioning/filter"
+
+    def split(self, conditioning, sigma):
+        if sigma <= 0.0:
+            low_list = [self._clone_entry(item) for item in conditioning]
+            high_list = [self._zero_entry(item) for item in conditioning]
+            return (low_list, high_list)
+
+        low_list = []
+        high_list = []
+
+        for embedding, metadata in conditioning:
+            if not isinstance(embedding, torch.Tensor) or embedding.dim() < 2:
+                low_list.append([embedding, dict(metadata)])
+                high_list.append(self._zero_entry([embedding, metadata]))
+                continue
+
+            needs_batch_dim = embedding.dim() == 2
+            embedding_tensor = embedding.unsqueeze(0) if needs_batch_dim else embedding
+
+            conv_dtype = ConditioningGaussianBlur._select_conv_dtype(embedding_tensor)
+            kernel, padding = ConditioningGaussianBlur._build_kernel(embedding_tensor.device, conv_dtype, sigma)
+
+            original_shape = embedding_tensor.shape
+            tokens = original_shape[-2]
+            features = original_shape[-1]
+
+            batch = math.prod(original_shape[:-2]) if len(original_shape) > 2 else original_shape[0]
+            reshaped = embedding_tensor.reshape(batch, tokens, features).permute(0, 2, 1)
+
+            if reshaped.dtype != conv_dtype:
+                reshaped = reshaped.to(conv_dtype)
+
+            kernel = kernel.repeat(features, 1, 1)
+            blurred = F.conv1d(reshaped, kernel, padding=padding, groups=features)
+            blurred = blurred.permute(0, 2, 1).reshape(original_shape)
+
+            if blurred.dtype != embedding_tensor.dtype:
+                blurred = blurred.to(embedding_tensor.dtype)
+
+            if needs_batch_dim:
+                blurred = blurred.squeeze(0)
+
+            high_embedding = embedding - blurred
+
+            low_meta = dict(metadata)
+            high_meta = dict(metadata)
+
+            pooled_output = low_meta.get("pooled_output")
+            if isinstance(pooled_output, torch.Tensor):
+                high_meta["pooled_output"] = torch.zeros_like(pooled_output)
+
+            low_list.append([blurred, low_meta])
+            high_list.append([high_embedding, high_meta])
+
+        return (low_list, high_list)
+
+    @staticmethod
+    def _clone_entry(entry):
+        embedding, metadata = entry
+        return [embedding, dict(metadata)]
+
+    @staticmethod
+    def _zero_entry(entry):
+        embedding, metadata = entry
+        if isinstance(embedding, torch.Tensor):
+            zero_embedding = torch.zeros_like(embedding)
+        else:
+            zero_embedding = embedding
+
+        meta_copy = dict(metadata)
+        pooled_output = meta_copy.get("pooled_output")
+        if isinstance(pooled_output, torch.Tensor):
+            meta_copy["pooled_output"] = torch.zeros_like(pooled_output)
+        return [zero_embedding, meta_copy]
+
+
 class ConditioningScale:
     """Scales conditioning embeddings (and pooled outputs) to amplify or mute prompt influence."""
 
@@ -675,6 +773,7 @@ NODE_CLASS_MAPPINGS = {
     "LatentHybridInverter": LatentHybridInverter,
     "ConditioningAddNoise": ConditioningAddNoise,
     "ConditioningGaussianBlur": ConditioningGaussianBlur,
+    "ConditioningFrequencySplit": ConditioningFrequencySplit,
     "ConditioningScale": ConditioningScale,
 }
 
@@ -687,5 +786,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",
     "ConditioningAddNoise": "Conditioning (Add Noise)",
     "ConditioningGaussianBlur": "Conditioning (Gaussian Blur)",
+    "ConditioningFrequencySplit": "Conditioning (Frequency Split)",
     "ConditioningScale": "Conditioning (Scale)",
 }
