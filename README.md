@@ -42,6 +42,18 @@ Uses the model's noise schedule (via `KSampler`) to add the amount of noise that
 
 Convenience node that calls the inverter and forward diffusion nodes internally, then blends their outputs using spherical interpolation. It keeps separate seeds for the creative and anchor paths and exposes the blend weight so you can bias towards either latent.
 
+## Creative play
+
+Image exploration rarely means chasing a single "correct" answer. These nodes are designed to be mixed and layered so you can steer a latent in different, often surprising, directions:
+
+- Lead with `Latent Hybrid Inverter` to recover structure, then nudge that structure by adding `Conditioning (Add Noise)` at a subtle strength (≈0.05–0.15). The latent stays coherent while the prompt wanders just enough to spark new ideas.
+- Follow the noise with `Conditioning (Gaussian Blur)` to soften abrupt emphasis changes or to merge multi-prompt blends into a single vibe. Blurring after noise often produces dreamlike, painterly shifts instead of chaotic drift.
+- Use `Conditioning (Scale)` as a volume knob while iterating: dial the factor down to 0.3–0.5 when you want the image to respond mostly to the recovered latent, then crank it above 1.5 when the textual guidance should take the lead.
+- Pair `Latent Gaussian Blur` with `Conditioning (Gaussian Blur)` for holistic smoothing—latent blur calms texture while conditioning blur calms prompt pacing. Reintroduce energy by sprinkling in `Add Latent Noise` or ramping the conditioning scale afterwards.
+- Swap seeds between the inverter, forward diffusion, and noise nodes as you iterate. Small tweaks here can shift the interplay between latent detail and prompt guidance, rewarding playful experimentation.
+
+Treat each slider as a brushstroke: push a setting until it breaks, back off to the sweet spot, and capture the happy accidents along the way.
+
 ## Example workflows
 
 ### Manual composition
