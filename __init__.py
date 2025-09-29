@@ -302,6 +302,73 @@ class LatentGaussianBlur:
         out["samples"] = blurred_tensor.cpu()
         return (out,)
 
+
+class LatentFrequencySplit:
+    """Splits a latent into low- and high-frequency bands via Gaussian smoothing."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "sigma": ("FLOAT", {
+                    "default": 1.5,
+                    "min": 0.0,
+                    "max": 20.0,
+                    "step": 0.1,
+                    "tooltip": "Radius of the Gaussian used for the low-pass. Higher values move detail into the high band."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "LATENT")
+    RETURN_NAMES = ("low_pass", "high_pass")
+    FUNCTION = "split"
+    CATEGORY = "Latent/Filter"
+
+    def split(self, latent, sigma):
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+
+        if sigma <= 0.0:
+            low_samples = latent_tensor
+            high_samples = torch.zeros_like(latent_tensor)
+        else:
+            low_samples = self._gaussian_blur(latent_tensor, sigma)
+            high_samples = latent_tensor - low_samples
+
+        low_latent = latent.copy()
+        low_latent["samples"] = low_samples.cpu()
+
+        high_latent = latent.copy()
+        high_latent["samples"] = high_samples.cpu()
+
+        return (low_latent, high_latent)
+
+    @staticmethod
+    def _gaussian_blur(latent_tensor, sigma):
+        tensor = latent_tensor
+        is_5d = tensor.dim() == 5
+
+        if is_5d:
+            b, c, t, h, w = tensor.shape
+            tensor_4d = tensor.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        else:
+            tensor_4d = tensor
+
+        kernel_size = int(sigma * 6) + 1
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        blurred_4d = TF.gaussian_blur(tensor_4d, kernel_size=kernel_size, sigma=sigma)
+
+        if is_5d:
+            blurred = blurred_4d.view(b, t, c, h, w).permute(0, 2, 1, 3, 4)
+        else:
+            blurred = blurred_4d
+
+        return blurred
+
 class LatentAddNoise:
     """
     Adds a configurable amount of seeded random noise to a latent tensor.
@@ -602,6 +669,7 @@ class ConditioningScale:
 NODE_CLASS_MAPPINGS = {
     "QwenRectifiedFlowInverter": QwenRectifiedFlowInverter,
     "LatentGaussianBlur": LatentGaussianBlur,
+    "LatentFrequencySplit": LatentFrequencySplit,
     "LatentAddNoise": LatentAddNoise,
     "LatentForwardDiffusion": LatentForwardDiffusion,
     "LatentHybridInverter": LatentHybridInverter,
@@ -613,6 +681,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "QwenRectifiedFlowInverter": "Qwen Rectified Flow Inverter",
     "LatentGaussianBlur": "Latent Gaussian Blur",
+    "LatentFrequencySplit": "Latent Frequency Split",
     "LatentAddNoise": "Add Latent Noise (Seeded)",
     "LatentForwardDiffusion": "Forward Diffusion (Add Scheduled Noise)",
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",

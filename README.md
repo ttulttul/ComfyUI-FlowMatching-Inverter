@@ -18,6 +18,10 @@ Runs the rectified-flow ODE backwards to re-noise an encoded latent. Supports de
 
 Applies a Gaussian blur directly in latent space. `Spatial Only` blurs each channel independently; `Spatial and Channel` performs a joint 3D blur across channels for stronger smoothing.
 
+### Latent Frequency Split
+
+Separates a latent into low-pass structure and high-frequency detail bands using a Gaussian crossover so you can process each side differently before recombining.
+
 ### Add Latent Noise (Seeded)
 
 Adds seeded Gaussian noise scaled by the input latent's standard deviation. Useful whenever a latent needs a controlled bump in noise without touching the schedule.
@@ -50,6 +54,7 @@ Image exploration rarely means chasing a single "correct" answer. These nodes ar
 - Follow the noise with `Conditioning (Gaussian Blur)` to soften abrupt emphasis changes or to merge multi-prompt blends into a single vibe. Blurring after noise often produces dreamlike, painterly shifts instead of chaotic drift.
 - Use `Conditioning (Scale)` as a volume knob while iterating: dial the factor down to 0.3–0.5 when you want the image to respond mostly to the recovered latent, then crank it above 1.5 when the textual guidance should take the lead.
 - Pair `Latent Gaussian Blur` with `Conditioning (Gaussian Blur)` for holistic smoothing—latent blur calms texture while conditioning blur calms prompt pacing. Reintroduce energy by sprinkling in `Add Latent Noise` or ramping the conditioning scale afterwards.
+- Split a latent with `Latent Frequency Split`, sharpen or noise the high band while blurring the low band, then recombine via `Latent Mixer`/`Add` nodes to weave sharp detail onto soft composition.
 - Swap seeds between the inverter, forward diffusion, and noise nodes as you iterate. Small tweaks here can shift the interplay between latent detail and prompt guidance, rewarding playful experimentation.
 
 Treat each slider as a brushstroke: push a setting until it breaks, back off to the sweet spot, and capture the happy accidents along the way.
