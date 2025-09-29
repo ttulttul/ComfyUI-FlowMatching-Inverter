@@ -26,6 +26,14 @@ Adds seeded Gaussian noise scaled by the input latent's standard deviation. Usef
 
 Adds seeded Gaussian noise to the CLIP conditioning embeddings (and pooled output when present). Great for introducing gentle prompt variation without rewriting text.
 
+### Conditioning (Gaussian Blur)
+
+Smooths the token embeddings with a Gaussian kernel along the prompt sequence, softening sharp emphasis changes while preserving the overall prompt content.
+
+### Conditioning (Scale)
+
+Multiplies the conditioning embeddings and pooled outputs by a user-defined factor so you can mute (0.0), keep (1.0), or amplify (>1.0) prompt influence without editing text.
+
 ### Forward Diffusion (Add Scheduled Noise)
 
 Uses the model's noise schedule (via `KSampler`) to add the amount of noise that corresponds to a given progress value. This is the "anchor" latent that samplers expect when starting from a given denoise level.

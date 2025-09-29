@@ -1,3 +1,5 @@
+import math
+
 import comfy.model_management
 import comfy.utils
 
@@ -469,6 +471,134 @@ class ConditioningAddNoise:
 
         return (result,)
 
+
+class ConditioningGaussianBlur:
+    """Applies Gaussian smoothing along the token dimension of conditioning embeddings."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "sigma": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "step": 0.05,
+                    "tooltip": "Standard deviation of the blur kernel along the token axis."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "blur"
+    CATEGORY = "conditioning/filter"
+
+    def blur(self, conditioning, sigma):
+        if sigma <= 0.0:
+            return (conditioning,)
+
+        result = []
+
+        for embedding, metadata in conditioning:
+            if not isinstance(embedding, torch.Tensor) or embedding.dim() < 2:
+                result.append([embedding, metadata])
+                continue
+
+            needs_batch_dim = embedding.dim() == 2
+            embedding_tensor = embedding.unsqueeze(0) if needs_batch_dim else embedding
+
+            conv_dtype = self._select_conv_dtype(embedding_tensor)
+            blur_kernel, padding = self._build_kernel(embedding_tensor.device, conv_dtype, sigma)
+
+            original_shape = embedding_tensor.shape
+            tokens = original_shape[-2]
+            features = original_shape[-1]
+
+            batch = math.prod(original_shape[:-2]) if len(original_shape) > 2 else original_shape[0]
+            reshaped = embedding_tensor.reshape(batch, tokens, features).permute(0, 2, 1)
+
+            if reshaped.dtype != conv_dtype:
+                reshaped = reshaped.to(conv_dtype)
+
+            kernel = blur_kernel.repeat(features, 1, 1)
+            blurred = F.conv1d(reshaped, kernel, padding=padding, groups=features)
+            blurred = blurred.permute(0, 2, 1).reshape(original_shape)
+
+            if blurred.dtype != embedding_tensor.dtype:
+                blurred = blurred.to(embedding_tensor.dtype)
+
+            if needs_batch_dim:
+                blurred = blurred.squeeze(0)
+
+            result.append([blurred, metadata])
+
+        return (result,)
+
+    @staticmethod
+    def _build_kernel(device, dtype, sigma):
+        kernel_size = int(sigma * 6) + 1
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+
+        half = kernel_size // 2
+        positions = torch.arange(kernel_size, device=device, dtype=dtype) - half
+        kernel = torch.exp(-0.5 * (positions / max(sigma, 1e-6)) ** 2)
+        kernel /= kernel.sum()
+        kernel = kernel.view(1, 1, kernel_size)
+        return kernel, half
+
+    @staticmethod
+    def _select_conv_dtype(tensor):
+        if tensor.device.type == "cpu" and tensor.dtype not in (torch.float32, torch.float64):
+            return torch.float32
+        return tensor.dtype
+
+
+class ConditioningScale:
+    """Scales conditioning embeddings (and pooled outputs) to amplify or mute prompt influence."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "factor": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "step": 0.05,
+                    "tooltip": "Multiplier applied to embeddings. 0.0 mutes, 1.0 keeps original strength."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "scale"
+    CATEGORY = "conditioning/filter"
+
+    def scale(self, conditioning, factor):
+        if factor == 1.0:
+            return (conditioning,)
+
+        result = []
+
+        for embedding, metadata in conditioning:
+            if not isinstance(embedding, torch.Tensor):
+                result.append([embedding, metadata])
+                continue
+
+            scaled_embedding = embedding * factor
+            new_metadata = dict(metadata)
+
+            pooled_output = new_metadata.get("pooled_output")
+            if isinstance(pooled_output, torch.Tensor):
+                new_metadata["pooled_output"] = pooled_output * factor
+
+            result.append([scaled_embedding, new_metadata])
+
+        return (result,)
+
 NODE_CLASS_MAPPINGS = {
     "QwenRectifiedFlowInverter": QwenRectifiedFlowInverter,
     "LatentGaussianBlur": LatentGaussianBlur,
@@ -476,6 +606,8 @@ NODE_CLASS_MAPPINGS = {
     "LatentForwardDiffusion": LatentForwardDiffusion,
     "LatentHybridInverter": LatentHybridInverter,
     "ConditioningAddNoise": ConditioningAddNoise,
+    "ConditioningGaussianBlur": ConditioningGaussianBlur,
+    "ConditioningScale": ConditioningScale,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -485,4 +617,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentForwardDiffusion": "Forward Diffusion (Add Scheduled Noise)",
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",
     "ConditioningAddNoise": "Conditioning (Add Noise)",
+    "ConditioningGaussianBlur": "Conditioning (Gaussian Blur)",
+    "ConditioningScale": "Conditioning (Scale)",
 }
