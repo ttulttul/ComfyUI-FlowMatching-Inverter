@@ -11,27 +11,25 @@ def slerp(val, low, high):
     """
     dims = low.shape
 
-    # Reshape to handle batches correctly
+    # Flatten per batch so we can SLERP across arbitrary shapes
     low = low.reshape(dims[0], -1)
     high = high.reshape(dims[0], -1)
 
     low_norm = F.normalize(low, p=2, dim=1)
     high_norm = F.normalize(high, p=2, dim=1)
 
-    # In case we divide by zero
+    # Guard against zero-length vectors
     low_norm[torch.isnan(low_norm)] = 0.0
     high_norm[torch.isnan(high_norm)] = 0.0
 
     omega = torch.acos((low_norm * high_norm).sum(1))
     so = torch.sin(omega)
 
-    # This handles the case where the angle is very small
-    # and prevents division by zero.
+    # Fallback to lerp when the angle is tiny to avoid numerical issues
     cond = so > 1e-3
 
     res = torch.zeros_like(low)
 
-    # For items where the angle is large enough, do SLERP
     if cond.any():
         omega_cond = omega[cond].unsqueeze(1)
         so_cond = so[cond].unsqueeze(1)
@@ -40,11 +38,8 @@ def slerp(val, low, high):
         term2 = (torch.sin(val * omega_cond) / so_cond) * high[cond]
         res[cond] = term1 + term2
 
-    # For items where the angle is too small, do linear interpolation
     if not cond.all():
         res[~cond] = (1.0 - val) * low[~cond] + val * high[~cond]
-    # --- END FIX ---
-
     return res.reshape(dims)
 
 class LatentHybridInverter:
@@ -195,13 +190,10 @@ class QwenRectifiedFlowInverter:
                 if predicted_velocity.dim() == 4:
                     predicted_velocity = predicted_velocity.unsqueeze(2)
 
-                # 1. Apply deterministic amplification
                 if velocity_amplification != 0.0:
                     predicted_velocity = predicted_velocity * (1.0 + velocity_amplification)
 
-                # 2. Apply stochastic (seeded) perturbation
                 if velocity_perturb_strength > 0:
-                    # Use a different seed for each step to ensure uncorrelated noise
                     step_seed = seed + i
                     generator = torch.Generator(device=device).manual_seed(step_seed)
                     
@@ -217,7 +209,6 @@ class QwenRectifiedFlowInverter:
                     perturbation = noise * velocity_std * velocity_perturb_strength
                     predicted_velocity = predicted_velocity + perturbation
 
-                # 3. Apply the final, modified velocity
                 dt = t_next - t_current
                 x_t = x_t + predicted_velocity * dt
 
@@ -273,7 +264,7 @@ class LatentGaussianBlur:
             if kernel_size % 2 == 0: kernel_size += 1
             blurred_4d = TF.gaussian_blur(latent_4d, kernel_size=kernel_size, sigma=sigma)
 
-        else: # "Spatial and Channel" mode
+        else:
             channels = latent_4d.shape[1]
             latent_5d_for_conv = latent_4d.unsqueeze(1)
 
@@ -288,14 +279,10 @@ class LatentGaussianBlur:
             gauss_c = torch.exp(-0.5 * torch.square(ax_c / sigma))
             gauss_s = torch.exp(-0.5 * torch.square(ax_s / sigma))
 
-            # --- FIX: Construct 3D kernel using reshaping and broadcasting ---
-            # Reshape 1D vectors to the correct orientation
             gauss_c = gauss_c.view(k_size_channel, 1, 1)
             gauss_h = gauss_s.view(1, k_size_spatial, 1)
             gauss_w = gauss_s.view(1, 1, k_size_spatial)
-            # Multiply them. Broadcasting handles the expansion to create the 3D kernel.
             kernel_3d = gauss_c * gauss_h * gauss_w
-            # --- END FIX ---
 
             kernel_3d /= torch.sum(kernel_3d)
             kernel_3d = kernel_3d.view(1, 1, k_size_channel, k_size_spatial, k_size_spatial)
@@ -339,18 +326,13 @@ class LatentAddNoise:
     CATEGORY = "Latent/Noise"
 
     def add_noise(self, latent, seed, strength):
-        # If strength is zero, do nothing and return the original latent.
         if strength == 0.0:
             return (latent,)
 
-        # Get the device and the latent tensor
         device = comfy.model_management.get_torch_device()
         latent_tensor = latent["samples"].clone().to(device)
 
-        # Create a seeded random number generator
         generator = torch.Generator(device=device).manual_seed(seed)
-        
-        # Generate noise with the same shape, device, and dtype as the latent
         noise = torch.randn(
             latent_tensor.shape,
             generator=generator,
@@ -358,15 +340,11 @@ class LatentAddNoise:
             dtype=latent_tensor.dtype
         )
 
-        # Scale the noise. A strength of 1.0 will make the noise have the
-        # same standard deviation as the original latent's signal.
         latent_std = torch.std(latent_tensor)
         scaled_noise = noise * latent_std * strength
 
-        # Add the scaled noise to the original latent
         noised_latent = latent_tensor + scaled_noise
 
-        # Package the result for output
         out = latent.copy()
         out["samples"] = noised_latent.cpu()
 
@@ -406,19 +384,15 @@ class LatentForwardDiffusion:
         device = comfy.model_management.get_torch_device()
         latent_tensor = latent["samples"].clone().to(device)
 
-        # Get the noise schedule (sigmas) from the model
         sampler = comfy.samplers.KSampler(model, steps=steps, device=device)
         sigmas = sampler.sigmas
 
-        # Find the sigma corresponding to our desired noise strength
-        # The start step is calculated from the end of the schedule
         start_step = steps - int(steps * noise_strength)
         if start_step >= len(sigmas):
             start_step = len(sigmas) - 1
 
         sigma = sigmas[start_step].to(device)
 
-        # Generate pure Gaussian noise
         generator = torch.Generator(device=device).manual_seed(seed)
         noise = torch.randn(
             latent_tensor.shape,
@@ -427,17 +401,11 @@ class LatentForwardDiffusion:
             dtype=latent_tensor.dtype
         )
 
-        # Apply the forward diffusion formula: x_t = x_0 + sigma * noise
-        # This is a simplified form for noise schedules where signal scaling is 1
         noised_latent = latent_tensor + noise * sigma
 
         out = latent.copy()
         out["samples"] = noised_latent.cpu()
         return (out,)
-
-# --------------------------------------------------------------------
-# ---------------------- NODE MAPPINGS -------------------------------
-# --------------------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
     "QwenRectifiedFlowInverter": QwenRectifiedFlowInverter,
