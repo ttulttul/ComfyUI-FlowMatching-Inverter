@@ -407,12 +407,75 @@ class LatentForwardDiffusion:
         out["samples"] = noised_latent.cpu()
         return (out,)
 
+
+class ConditioningAddNoise:
+    """Adds seeded Gaussian noise to conditioning embeddings and pooled outputs."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": ("CONDITIONING",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "strength": ("FLOAT", {
+                    "default": 0.1,
+                    "min": 0.0,
+                    "max": 5.0,
+                    "step": 0.01,
+                    "tooltip": "Noise strength relative to each tensor's standard deviation."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "add_noise"
+    CATEGORY = "conditioning/noise"
+
+    def add_noise(self, conditioning, seed, strength):
+        if strength == 0.0:
+            return (conditioning,)
+
+        generator = torch.Generator(device="cpu").manual_seed(seed)
+        result = []
+
+        for embedding, metadata in conditioning:
+            if not isinstance(embedding, torch.Tensor):
+                result.append([embedding, metadata])
+                continue
+
+            embedding_std = torch.std(embedding)
+            noise = torch.randn(
+                embedding.shape,
+                generator=generator,
+                device=embedding.device,
+                dtype=embedding.dtype,
+            )
+            noised_embedding = embedding + noise * embedding_std * strength
+
+            new_metadata = dict(metadata)
+            pooled_output = new_metadata.get("pooled_output")
+
+            if isinstance(pooled_output, torch.Tensor):
+                pooled_std = torch.std(pooled_output)
+                pooled_noise = torch.randn(
+                    pooled_output.shape,
+                    generator=generator,
+                    device=pooled_output.device,
+                    dtype=pooled_output.dtype,
+                )
+                new_metadata["pooled_output"] = pooled_output + pooled_noise * pooled_std * strength
+
+            result.append([noised_embedding, new_metadata])
+
+        return (result,)
+
 NODE_CLASS_MAPPINGS = {
     "QwenRectifiedFlowInverter": QwenRectifiedFlowInverter,
     "LatentGaussianBlur": LatentGaussianBlur,
     "LatentAddNoise": LatentAddNoise,
     "LatentForwardDiffusion": LatentForwardDiffusion,
     "LatentHybridInverter": LatentHybridInverter,
+    "ConditioningAddNoise": ConditioningAddNoise,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -421,4 +484,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentAddNoise": "Add Latent Noise (Seeded)",
     "LatentForwardDiffusion": "Forward Diffusion (Add Scheduled Noise)",
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",
+    "ConditioningAddNoise": "Conditioning (Add Noise)",
 }

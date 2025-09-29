@@ -4,7 +4,7 @@ Custom nodes for ComfyUI that target rectified-flow models (for example, Qwen). 
 
 - integrate the model's velocity field to produce a partially inverted latent,
 - add noise using the same schedule as the sampler, and
-- perform small latent-domain cleanups.
+- perform small latent-domain cleanups or conditioning perturbations.
 
 Each node is available on its own, and the hybrid node chains them together for a single-drop workflow.
 
@@ -21,6 +21,10 @@ Applies a Gaussian blur directly in latent space. `Spatial Only` blurs each chan
 ### Add Latent Noise (Seeded)
 
 Adds seeded Gaussian noise scaled by the input latent's standard deviation. Useful whenever a latent needs a controlled bump in noise without touching the schedule.
+
+### Conditioning (Add Noise)
+
+Adds seeded Gaussian noise to the CLIP conditioning embeddings (and pooled output when present). Great for introducing gentle prompt variation without rewriting text.
 
 ### Forward Diffusion (Add Scheduled Noise)
 
