@@ -8,6 +8,12 @@ Custom nodes for ComfyUI that target rectified-flow models (for example, Qwen). 
 
 Each node is available on its own, and the hybrid node chains them together for a single-drop workflow.
 
+## Conditioning primer
+
+ComfyUI passes prompt information around as a Python list of `[embedding, metadata]` pairs. The `embedding` tensor stores the per-token hidden states produced by the text encoder (shape ≈ `batch × tokens × features`, or `tokens × features` when the batch dimension is implicit). The accompanying `metadata` dictionary carries auxiliary fields—most notably `pooled_output`, a single vector that summarises the whole prompt (CLS token, sentence average, etc.).
+
+Whenever you tweak conditioning with the nodes below you are directly manipulating those tensors. Splitting, blurring, or scaling happens along the token axis, while pooled outputs are updated in lockstep so downstream samplers still receive a coherent summary.
+
 ## Node overview
 
 ### Qwen Rectified Flow Inverter
