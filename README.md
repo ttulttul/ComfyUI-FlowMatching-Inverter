@@ -30,6 +30,8 @@ Adds seeded Gaussian noise scaled by the input latent's standard deviation. Usef
 
 Adds seeded Gaussian noise to the CLIP conditioning embeddings (and pooled output when present). Great for introducing gentle prompt variation without rewriting text.
 
+Sensible values of `strength` range from 0.0 to 1.5. Above this range, the Qwen model's output tends to get silly, with Chinese characters overlaid on the image.
+
 ### Conditioning (Gaussian Blur)
 
 Smooths the token embeddings with a Gaussian kernel along the prompt sequence, softening sharp emphasis changes while preserving the overall prompt content.
@@ -38,9 +40,13 @@ Smooths the token embeddings with a Gaussian kernel along the prompt sequence, s
 
 Generates low- and high-frequency prompt embeddings so you can tame the overall narrative while separately shaping high-energy emphasis tokens.
 
+Sensible values of `sigma` range from 0.1 to 1.3. The higher you raise `sigma`, the more of the conditioning information that will be shoved into the `low_pass` conditioning output. Values well above 1.0 are really equivalent to knocking out the high pass signal entirely. But strange and interesting results can be obtained by using a very high sigma in combination with a very high value of `gain` for the `high_pass` conditioning in the `Conditioning (Frequency Merge)` node.
+
 ### Conditioning (Frequency Merge)
 
 Recombines low/high conditioning bands with adjustable gains so you can dial detail back in after sculpting each band independently. Boosting the low band reinforces the prompt's broad narrative and stability, while boosting the high band pushes sharp emphasis changes and punctuation to the forefront.
+
+Feed the output of the `Conditioning (Frequency Split)` node into the input of this node and then play around with the gain knobs for interesting effects. Or peel off the high or low-pass conditioning and then add noise to one or the other, or combine the high pass conditionings of two different `CLIP Text Encode` outputs... the combinations are endless.
 
 ### Conditioning (Scale)
 
