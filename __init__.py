@@ -720,6 +720,66 @@ class ConditioningFrequencySplit:
         return [zero_embedding, meta_copy]
 
 
+class ConditioningFrequencyMerge:
+    """Recombines low/high conditioning bands back into a single conditioning list."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "low_pass": ("CONDITIONING",),
+                "high_pass": ("CONDITIONING",),
+                "low_gain": ("FLOAT", {
+                    "default": 1.0,
+                    "min": -5.0,
+                    "max": 5.0,
+                    "step": 0.05,
+                    "tooltip": "Multiplier for the low-pass band before merging."
+                }),
+                "high_gain": ("FLOAT", {
+                    "default": 1.0,
+                    "min": -5.0,
+                    "max": 5.0,
+                    "step": 0.05,
+                    "tooltip": "Multiplier for the high-pass band before merging."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "merge"
+    CATEGORY = "conditioning/filter"
+
+    def merge(self, low_pass, high_pass, low_gain, high_gain):
+        if len(low_pass) != len(high_pass):
+            raise ValueError("Low-pass and high-pass conditioning lists must have the same length")
+
+        merged = []
+
+        for low_item, high_item in zip(low_pass, high_pass):
+            low_embedding, low_meta = low_item
+            high_embedding, high_meta = high_item
+
+            if not isinstance(low_embedding, torch.Tensor) or not isinstance(high_embedding, torch.Tensor):
+                merged.append([low_embedding, dict(low_meta)])
+                continue
+
+            combined_embedding = low_embedding * low_gain + high_embedding * high_gain
+
+            new_metadata = dict(low_meta)
+            low_pooled = low_meta.get("pooled_output")
+            high_pooled = high_meta.get("pooled_output") if isinstance(high_meta, dict) else None
+
+            if isinstance(low_pooled, torch.Tensor) or isinstance(high_pooled, torch.Tensor):
+                low_pooled_tensor = low_pooled if isinstance(low_pooled, torch.Tensor) else torch.zeros_like(high_pooled)
+                high_pooled_tensor = high_pooled if isinstance(high_pooled, torch.Tensor) else torch.zeros_like(low_pooled_tensor)
+                new_metadata["pooled_output"] = low_pooled_tensor * low_gain + high_pooled_tensor * high_gain
+
+            merged.append([combined_embedding, new_metadata])
+
+        return (merged,)
+
+
 class ConditioningScale:
     """Scales conditioning embeddings (and pooled outputs) to amplify or mute prompt influence."""
 
@@ -774,6 +834,7 @@ NODE_CLASS_MAPPINGS = {
     "ConditioningAddNoise": ConditioningAddNoise,
     "ConditioningGaussianBlur": ConditioningGaussianBlur,
     "ConditioningFrequencySplit": ConditioningFrequencySplit,
+    "ConditioningFrequencyMerge": ConditioningFrequencyMerge,
     "ConditioningScale": ConditioningScale,
 }
 
@@ -787,5 +848,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ConditioningAddNoise": "Conditioning (Add Noise)",
     "ConditioningGaussianBlur": "Conditioning (Gaussian Blur)",
     "ConditioningFrequencySplit": "Conditioning (Frequency Split)",
+    "ConditioningFrequencyMerge": "Conditioning (Frequency Merge)",
     "ConditioningScale": "Conditioning (Scale)",
 }

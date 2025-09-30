@@ -38,6 +38,10 @@ Smooths the token embeddings with a Gaussian kernel along the prompt sequence, s
 
 Generates low- and high-frequency prompt embeddings so you can tame the overall narrative while separately shaping high-energy emphasis tokens.
 
+### Conditioning (Frequency Merge)
+
+Recombines low/high conditioning bands with adjustable gains so you can dial detail back in after sculpting each band independently. Boosting the low band reinforces the prompt's broad narrative and stability, while boosting the high band pushes sharp emphasis changes and punctuation to the forefront.
+
 ### Conditioning (Scale)
 
 Multiplies the conditioning embeddings and pooled outputs by a user-defined factor so you can mute (0.0), keep (1.0), or amplify (>1.0) prompt influence without editing text.
@@ -59,7 +63,7 @@ Image exploration rarely means chasing a single "correct" answer. These nodes ar
 - Use `Conditioning (Scale)` as a volume knob while iterating: dial the factor down to 0.3–0.5 when you want the image to respond mostly to the recovered latent, then crank it above 1.5 when the textual guidance should take the lead.
 - Pair `Latent Gaussian Blur` with `Conditioning (Gaussian Blur)` for holistic smoothing—latent blur calms texture while conditioning blur calms prompt pacing. Reintroduce energy by sprinkling in `Add Latent Noise` or ramping the conditioning scale afterwards.
 - Split a latent with `Latent Frequency Split`, sharpen or noise the high band while blurring the low band, then recombine via `Latent Mixer`/`Add` nodes to weave sharp detail onto soft composition.
-- Carve prompts with `Conditioning (Frequency Split)`: keep low-band text steady for the story while remapping the high band through noise, blur, or scale to emphasize only certain fragments.
+- Carve prompts with `Conditioning (Frequency Split)` and return them through `Conditioning (Frequency Merge)`: keep low-band text steady for the story while remapping the high band through noise, blur, or scale to emphasize only certain fragments.
 - Swap seeds between the inverter, forward diffusion, and noise nodes as you iterate. Small tweaks here can shift the interplay between latent detail and prompt guidance, rewarding playful experimentation.
 
 Treat each slider as a brushstroke: push a setting until it breaks, back off to the sweet spot, and capture the happy accidents along the way.
