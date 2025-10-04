@@ -327,13 +327,12 @@ def _worley_noise(size, seed, feature_points, metric, jitter, device):
 
     ys = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=dtype)
     xs = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=dtype)
-    grid_y = ys.view(height, 1, 1)
-    grid_x = xs.view(1, width, 1)
+    grid_y = ys.view(height, 1).expand(height, width)
+    grid_x = xs.view(1, width).expand(height, width)
 
-    diff_y = grid_y - points[:, 1]
-    diff_x = grid_x - points[:, 0]
-
-    diff = torch.stack((diff_x, diff_y), dim=-1)
+    grid = torch.stack((grid_x, grid_y), dim=-1)
+    point_offsets = points.view(1, 1, feature_points, 2)
+    diff = grid.unsqueeze(2) - point_offsets
 
     if metric == "manhattan":
         distances = diff.abs().sum(dim=-1)
