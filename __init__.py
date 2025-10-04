@@ -773,6 +773,17 @@ class LatentSwirlNoise:
                     "max": 16,
                     "tooltip": "Number of independent vortex centres to spawn per latent."
                 }),
+                "channel_mode": (["global", "per_channel"], {
+                    "default": "global",
+                    "tooltip": "Use a shared swirl grid for all channels or generate unique grids per affected channel."
+                }),
+                "channel_fraction": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Fraction of channels to swirl. The subset is randomly selected per sample."
+                }),
                 "strength": ("FLOAT", {
                     "default": 0.75,
                     "min": 0.0,
@@ -815,7 +826,8 @@ class LatentSwirlNoise:
     FUNCTION = "add_swirl_noise"
     CATEGORY = "Latent/Noise"
 
-    def add_swirl_noise(self, latent, seed, vortices, strength, radius, center_spread, direction_bias, mix):
+    def add_swirl_noise(self, latent, seed, vortices, channel_mode, channel_fraction,
+                        strength, radius, center_spread, direction_bias, mix):
         if strength == 0.0 or mix == 0.0:
             return (latent,)
 
@@ -839,41 +851,84 @@ class LatentSwirlNoise:
         mix = max(0.0, min(mix, 1.0))
         bias_threshold = max(0.0, min(1.0, (direction_bias + 1.0) * 0.5))
         vortex_count = max(1, int(vortices))
+        channel_fraction = max(0.0, min(1.0, channel_fraction))
 
         cpu_generator = torch.Generator(device="cpu").manual_seed(seed)
 
         total = working.shape[0]
 
         for idx in range(total):
-            rand_vals = torch.rand((vortex_count, 3), generator=cpu_generator)
-            vortex_params = []
+            if channel_fraction <= 0.0:
+                result[idx] = working[idx]
+                continue
 
-            for vortex_idx in range(vortex_count):
-                offsets = (rand_vals[vortex_idx, :2] * 2.0 - 1.0) * center_spread
-                center_y = offsets[0].item()
-                center_x = offsets[1].item()
-                direction = 1.0 if rand_vals[vortex_idx, 2].item() < bias_threshold else -1.0
-                vortex_params.append((center_x, center_y, float(strength), float(radius), direction))
-
-            grid = _swirl_grid(base_y, base_x, vortex_params).unsqueeze(0)
-
-            sample = working[idx:idx + 1]
-            warped = F.grid_sample(
-                sample.to(base_dtype),
-                grid,
-                mode="bilinear",
-                padding_mode="reflection",
-                align_corners=True,
+            channel_count = working.shape[1]
+            selected_count = min(
+                channel_count,
+                max(1, math.ceil(channel_count * channel_fraction))
             )
 
-            warped = warped.to(sample.dtype)
+            channel_indices = torch.randperm(channel_count, generator=cpu_generator)[:selected_count]
 
-            if mix >= 1.0:
-                combined = warped
-            else:
-                combined = sample + (warped - sample) * mix
+            sample = working[idx:idx + 1]
+            sample_result = sample.clone()
 
-            result[idx] = combined[0]
+            if channel_mode == "global":
+                rand_vals = torch.rand((vortex_count, 3), generator=cpu_generator)
+                vortex_params = []
+
+                for vortex_idx in range(vortex_count):
+                    offsets = (rand_vals[vortex_idx, :2] * 2.0 - 1.0) * center_spread
+                    center_y = offsets[0].item()
+                    center_x = offsets[1].item()
+                    direction = 1.0 if rand_vals[vortex_idx, 2].item() < bias_threshold else -1.0
+                    vortex_params.append((center_x, center_y, float(strength), float(radius), direction))
+
+                grid = _swirl_grid(base_y, base_x, vortex_params).unsqueeze(0)
+                warped = F.grid_sample(
+                    sample.to(base_dtype),
+                    grid,
+                    mode="bilinear",
+                    padding_mode="reflection",
+                    align_corners=True,
+                ).to(sample.dtype)
+
+                if mix >= 1.0:
+                    sample_result[:, channel_indices] = warped[:, channel_indices]
+                else:
+                    delta = warped[:, channel_indices] - sample[:, channel_indices]
+                    sample_result[:, channel_indices] = sample[:, channel_indices] + delta * mix
+
+            else:  # per_channel
+                for channel_idx in channel_indices.tolist():
+                    rand_vals = torch.rand((vortex_count, 3), generator=cpu_generator)
+                    vortex_params = []
+
+                    for vortex_idx in range(vortex_count):
+                        offsets = (rand_vals[vortex_idx, :2] * 2.0 - 1.0) * center_spread
+                        center_y = offsets[0].item()
+                        center_x = offsets[1].item()
+                        direction = 1.0 if rand_vals[vortex_idx, 2].item() < bias_threshold else -1.0
+                        vortex_params.append((center_x, center_y, float(strength), float(radius), direction))
+
+                    grid = _swirl_grid(base_y, base_x, vortex_params).unsqueeze(0)
+
+                    channel_slice = sample[:, channel_idx:channel_idx + 1].to(base_dtype)
+                    warped_channel = F.grid_sample(
+                        channel_slice,
+                        grid,
+                        mode="bilinear",
+                        padding_mode="reflection",
+                        align_corners=True,
+                    ).to(sample.dtype)
+
+                    if mix >= 1.0:
+                        sample_result[:, channel_idx:channel_idx + 1] = warped_channel
+                    else:
+                        delta = warped_channel - sample[:, channel_idx:channel_idx + 1]
+                        sample_result[:, channel_idx:channel_idx + 1] = sample[:, channel_idx:channel_idx + 1] + delta * mix
+
+            result[idx] = sample_result[0]
 
         if is_video:
             result = result.reshape(batch, frames, channels, height, width).permute(0, 2, 1, 3, 4)

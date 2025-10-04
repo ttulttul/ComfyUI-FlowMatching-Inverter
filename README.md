@@ -38,7 +38,7 @@ Generates smooth octave-based Perlin noise and adds it to the latent. Tune the b
 
 ### Latent Swirl Noise
 
-Warps the latent around one or more seeded vortices using `grid_sample`. Control the vortex count, maximum rotation (in radians), falloff radius, centre jitter, and blend strength to inject painterly whirlpools or gentle twisting motion into the underlying features.
+Warps the latent around one or more seeded vortices using `grid_sample`. Choose between a global grid (shared across channels) or per-channel grids, set the fraction of channels to affect, and control vortex count, rotation, falloff radius, centre jitter, and blend to inject painterly whirlpools or gentle twisting motion where you want it.
 
 ### Conditioning (Add Noise)
 
@@ -82,7 +82,7 @@ Image exploration rarely means chasing a single "correct" answer. These nodes ar
 - Follow the noise with `Conditioning (Gaussian Blur)` to soften abrupt emphasis changes or to merge multi-prompt blends into a single vibe. Blurring after noise often produces dreamlike, painterly shifts instead of chaotic drift.
 - Use `Conditioning (Scale)` as a volume knob while iterating: dial the factor down to 0.3–0.5 when you want the image to respond mostly to the recovered latent, then crank it above 1.5 when the textual guidance should take the lead.
 - Pair `Latent Gaussian Blur` with `Conditioning (Gaussian Blur)` for holistic smoothing—latent blur calms texture while conditioning blur calms prompt pacing. Reintroduce energy by sprinkling in `Add Latent Noise` or ramping the conditioning scale afterwards.
-- Sculpt structured detail by layering `Latent Perlin Fractal Noise` (shared mode for broad waves, per-channel for colour shifts) before blending back with `Latent Swirl Noise`—increase `vortices` for multi-spiral motion, or keep it at 1 for a single focal swirl.
+- Sculpt structured detail by layering `Latent Perlin Fractal Noise` (shared mode for broad waves, per-channel for colour shifts) before blending back with `Latent Swirl Noise`—increase `vortices` for multi-spiral motion, switch to per-channel grids, or drop `channel_fraction` to swirl only a handful of feature maps.
 - Split a latent with `Latent Frequency Split`, sharpen or noise the high band while blurring the low band, then recombine via `Latent Mixer`/`Add` nodes to weave sharp detail onto soft composition.
 - Carve prompts with `Conditioning (Frequency Split)` and return them through `Conditioning (Frequency Merge)`: keep low-band text steady for the story while remapping the high band through noise, blur, or scale to emphasize only certain fragments.
 - Swap seeds between the inverter, forward diffusion, and noise nodes as you iterate. Small tweaks here can shift the interplay between latent detail and prompt guidance, rewarding playful experimentation.
