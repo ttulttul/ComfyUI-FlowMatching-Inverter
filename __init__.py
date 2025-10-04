@@ -282,17 +282,17 @@ class LatentHybridInverter:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("MODEL",),
-                "latent_image": ("LATENT",),
-                "positive": ("CONDITIONING", ),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 1000}),
+                "model": ("MODEL", {"tooltip": "UNet model used for both inversion and diffusion passes."}),
+                "latent_image": ("LATENT", {"tooltip": "Latent tensor to invert and re-noise."}),
+                "positive": ("CONDITIONING", {"tooltip": "Positive prompt conditioning that guides both passes."}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 1000, "tooltip": "Solver steps executed for inversion and forward diffusion."}),
                 "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Strength for both inversion and forward diffusion. The target noise level."}),
                 "blend_factor": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "0.0 = 100% Forward Diffusion (Stable), 1.0 = 100% Inverter (Creative)"}),
                 "inverter_seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the creative, perturbed inversion process."}),
                 "forward_diffusion_seed": ("INT", {"default": 1, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the stable, 'perfect' noise anchor."}),
-                "velocity_amplification": ("FLOAT", {"default": 1.0, "min": -0.9, "max": 2.0, "step": 0.05}),
-                "velocity_perturb_strength": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 5.0, "step": 0.01}),
-                "internal_precision": (["bfloat16", "float16", "force_float32"], {"default": "bfloat16"}),
+                "velocity_amplification": ("FLOAT", {"default": 1.0, "min": -0.9, "max": 2.0, "step": 0.05, "tooltip": "Deterministically scales the predicted velocity each step."}),
+                "velocity_perturb_strength": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Random velocity noise level for the inverter stage."}),
+                "internal_precision": (["bfloat16", "float16", "force_float32"], {"default": "bfloat16", "tooltip": "Precision used for inverter UNet autocast."}),
                 "normalize_output": (["enable", "disable"], {"default": "enable", "tooltip": "Normalizing the inverter output is highly recommended."}),
             }
         }
@@ -359,12 +359,12 @@ class QwenRectifiedFlowInverter:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("MODEL",),
-                "latent_image": ("LATENT",),
-                "positive": ("CONDITIONING", ),
+                "model": ("MODEL", {"tooltip": "UNet to integrate during the rectified flow inversion."}),
+                "latent_image": ("LATENT", {"tooltip": "Latent to be inverted toward the clean state."}),
+                "positive": ("CONDITIONING", {"tooltip": "Positive prompt conditioning applied during inversion."}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the random velocity perturbation."}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 1000}),
-                "inversion_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 1000, "tooltip": "Number of integration steps available for the inverter."}),
+                "inversion_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Fraction of the schedule to walk backward during inversion."}),
                 "velocity_amplification": ("FLOAT", {
                     "default": 0.0, 
                     "min": -0.9, 
@@ -379,7 +379,7 @@ class QwenRectifiedFlowInverter:
                     "step": 0.01, 
                     "tooltip": "Adds seeded random noise to the velocity. >1.0 will heavily randomize the path."
                 }),
-                "internal_precision": (["bfloat16", "float16", "force_float32"], {"default": "bfloat16"}),
+                "internal_precision": (["bfloat16", "float16", "force_float32"], {"default": "bfloat16", "tooltip": "Autocast precision used while running the inverter UNet."}),
                 "normalize_output": (["enable", "disable"], {"default": "enable", "tooltip": "Crucial for high inversion strengths. Rescales the output latent to a standard distribution (mean=0, std=1) to prevent the sampler from collapsing."}),
             }
         }
@@ -471,9 +471,9 @@ class LatentGaussianBlur:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "latent": ("LATENT",),
-                "sigma": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
-                "blur_mode": (["Spatial Only", "Spatial and Channel"], {"default": "Spatial Only"}),
+                "latent": ("LATENT", {"tooltip": "Latent tensor to blur."}),
+                "sigma": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1, "tooltip": "Standard deviation for the Gaussian kernel."}),
+                "blur_mode": (["Spatial Only", "Spatial and Channel"], {"default": "Spatial Only", "tooltip": "Choose whether to blur across spatial dimensions only or include channels."}),
             }
         }
     RETURN_TYPES = ("LATENT",)
@@ -543,7 +543,7 @@ class LatentFrequencySplit:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "latent": ("LATENT",),
+                "latent": ("LATENT", {"tooltip": "Latent to decompose into low/high frequency bands."}),
                 "sigma": ("FLOAT", {
                     "default": 1.5,
                     "min": 0.0,
@@ -611,8 +611,8 @@ class LatentAddNoise:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "latent": ("LATENT",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "latent": ("LATENT", {"tooltip": "Latent to receive additional Gaussian noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for generating repeatable noise."}),
                 "strength": ("FLOAT", {
                     "default": 1.0, 
                     "min": 0.0, 
@@ -660,8 +660,8 @@ class LatentPerlinFractalNoise:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "latent": ("LATENT",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "latent": ("LATENT", {"tooltip": "Latent that will be perturbed with fractal Perlin noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed controlling the procedural noise pattern."}),
                 "frequency": ("FLOAT", {
                     "default": 2.0,
                     "min": 0.01,
@@ -765,8 +765,8 @@ class LatentSwirlNoise:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "latent": ("LATENT",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "latent": ("LATENT", {"tooltip": "Latent to deform with vortex-style warps."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for vortex placement and direction randomness."}),
                 "vortices": ("INT", {
                     "default": 1,
                     "min": 1,
@@ -947,10 +947,10 @@ class LatentForwardDiffusion:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("MODEL",),
-                "latent": ("LATENT",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "model": ("MODEL", {"tooltip": "Diffusion model that defines the forward noise schedule."}),
+                "latent": ("LATENT", {"tooltip": "Clean latent to push forward along the schedule."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the forward diffusion noise."}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000, "tooltip": "Number of steps in the sampler's schedule."}),
                 "noise_strength": ("FLOAT", {
                     "default": 0.8,
                     "min": 0.0,
@@ -1003,8 +1003,8 @@ class ConditioningAddNoise:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "conditioning": ("CONDITIONING",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "conditioning": ("CONDITIONING", {"tooltip": "Conditioning list to perturb with Gaussian noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed that drives the conditioning noise."}),
                 "strength": ("FLOAT", {
                     "default": 0.1,
                     "min": 0.0,
@@ -1065,7 +1065,7 @@ class ConditioningGaussianBlur:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "conditioning": ("CONDITIONING",),
+                "conditioning": ("CONDITIONING", {"tooltip": "Conditioning list whose token dimension will be blurred."}),
                 "sigma": ("FLOAT", {
                     "default": 0.75,
                     "min": 0.0,
@@ -1148,7 +1148,7 @@ class ConditioningFrequencySplit:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "conditioning": ("CONDITIONING",),
+                "conditioning": ("CONDITIONING", {"tooltip": "Conditioning list to separate into low/high bands."}),
                 "sigma": ("FLOAT", {
                     "default": 0.75,
                     "min": 0.0,
@@ -1246,8 +1246,8 @@ class ConditioningFrequencyMerge:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "low_pass": ("CONDITIONING",),
-                "high_pass": ("CONDITIONING",),
+                "low_pass": ("CONDITIONING", {"tooltip": "Low-frequency conditioning list produced by the split node."}),
+                "high_pass": ("CONDITIONING", {"tooltip": "High-frequency conditioning list to recombine."}),
                 "low_gain": ("FLOAT", {
                     "default": 1.0,
                     "min": -5.0,
@@ -1306,7 +1306,7 @@ class ConditioningScale:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "conditioning": ("CONDITIONING",),
+                "conditioning": ("CONDITIONING", {"tooltip": "Conditioning list to scale."}),
                 "factor": ("FLOAT", {
                     "default": 1.0,
                     "min": 0.0,
