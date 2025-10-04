@@ -7,6 +7,230 @@ import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 
+
+def _fade(t):
+    return t * t * t * (t * (t * 6 - 15) + 10)
+
+
+def _lerp(a, b, t):
+    return a + t * (b - a)
+
+
+def _generate_permutation(seed, device):
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    perm = torch.randperm(256, generator=generator)
+    return torch.cat([perm, perm]).to(device)
+
+
+def _coordinate_grid(size, device, dtype):
+    axes = [torch.linspace(0.0, 1.0, steps=s, device=device, dtype=dtype) for s in size]
+    return torch.meshgrid(*axes, indexing="ij")
+
+
+def _perlin_2d(x, y, perm, dtype):
+    gradients = torch.tensor(
+        [[1, 1], [-1, 1], [1, -1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]],
+        dtype=dtype,
+        device=x.device,
+    )
+
+    x0 = torch.floor(x)
+    y0 = torch.floor(y)
+
+    xi = torch.remainder(x0.to(torch.int64), 256)
+    yi = torch.remainder(y0.to(torch.int64), 256)
+
+    xf = x - x0
+    yf = y - y0
+
+    xi1 = torch.remainder(xi + 1, 256)
+    yi1 = torch.remainder(yi + 1, 256)
+
+    perm_xi = perm[xi]
+    perm_xi1 = perm[xi1]
+
+    aa = perm[perm_xi + yi]
+    ab = perm[perm_xi + yi1]
+    ba = perm[perm_xi1 + yi]
+    bb = perm[perm_xi1 + yi1]
+
+    grad_count = gradients.shape[0]
+
+    g_aa = gradients[torch.remainder(aa, grad_count)]
+    g_ab = gradients[torch.remainder(ab, grad_count)]
+    g_ba = gradients[torch.remainder(ba, grad_count)]
+    g_bb = gradients[torch.remainder(bb, grad_count)]
+
+    xf_1 = xf - 1.0
+    yf_1 = yf - 1.0
+
+    dot_aa = g_aa[..., 0] * xf + g_aa[..., 1] * yf
+    dot_ba = g_ba[..., 0] * xf_1 + g_ba[..., 1] * yf
+    dot_ab = g_ab[..., 0] * xf + g_ab[..., 1] * yf_1
+    dot_bb = g_bb[..., 0] * xf_1 + g_bb[..., 1] * yf_1
+
+    u = _fade(xf)
+    v = _fade(yf)
+
+    x1 = _lerp(dot_aa, dot_ba, u)
+    x2 = _lerp(dot_ab, dot_bb, u)
+    return _lerp(x1, x2, v)
+
+
+def _perlin_3d(x, y, z, perm, dtype):
+    gradients = torch.tensor(
+        [
+            [1, 1, 0],
+            [-1, 1, 0],
+            [1, -1, 0],
+            [-1, -1, 0],
+            [1, 0, 1],
+            [-1, 0, 1],
+            [1, 0, -1],
+            [-1, 0, -1],
+            [0, 1, 1],
+            [0, -1, 1],
+            [0, 1, -1],
+            [0, -1, -1],
+        ],
+        dtype=dtype,
+        device=x.device,
+    )
+
+    x0 = torch.floor(x)
+    y0 = torch.floor(y)
+    z0 = torch.floor(z)
+
+    xi = torch.remainder(x0.to(torch.int64), 256)
+    yi = torch.remainder(y0.to(torch.int64), 256)
+    zi = torch.remainder(z0.to(torch.int64), 256)
+
+    xf = x - x0
+    yf = y - y0
+    zf = z - z0
+
+    xi1 = torch.remainder(xi + 1, 256)
+    yi1 = torch.remainder(yi + 1, 256)
+    zi1 = torch.remainder(zi + 1, 256)
+
+    perm_xi = perm[xi]
+    perm_xi1 = perm[xi1]
+
+    perm_xy = perm[perm_xi + yi]
+    perm_xy1 = perm[perm_xi + yi1]
+    perm_x1y = perm[perm_xi1 + yi]
+    perm_x1y1 = perm[perm_xi1 + yi1]
+
+    aaa = perm[perm_xy + zi]
+    aab = perm[perm_xy + zi1]
+    aba = perm[perm_xy1 + zi]
+    abb = perm[perm_xy1 + zi1]
+    baa = perm[perm_x1y + zi]
+    bab = perm[perm_x1y + zi1]
+    bba = perm[perm_x1y1 + zi]
+    bbb = perm[perm_x1y1 + zi1]
+
+    grad_count = gradients.shape[0]
+
+    g_aaa = gradients[torch.remainder(aaa, grad_count)]
+    g_aab = gradients[torch.remainder(aab, grad_count)]
+    g_aba = gradients[torch.remainder(aba, grad_count)]
+    g_abb = gradients[torch.remainder(abb, grad_count)]
+    g_baa = gradients[torch.remainder(baa, grad_count)]
+    g_bab = gradients[torch.remainder(bab, grad_count)]
+    g_bba = gradients[torch.remainder(bba, grad_count)]
+    g_bbb = gradients[torch.remainder(bbb, grad_count)]
+
+    xf_1 = xf - 1.0
+    yf_1 = yf - 1.0
+    zf_1 = zf - 1.0
+
+    dot_aaa = g_aaa[..., 0] * xf + g_aaa[..., 1] * yf + g_aaa[..., 2] * zf
+    dot_baa = g_baa[..., 0] * xf_1 + g_baa[..., 1] * yf + g_baa[..., 2] * zf
+    dot_aba = g_aba[..., 0] * xf + g_aba[..., 1] * yf_1 + g_aba[..., 2] * zf
+    dot_bba = g_bba[..., 0] * xf_1 + g_bba[..., 1] * yf_1 + g_bba[..., 2] * zf
+    dot_aab = g_aab[..., 0] * xf + g_aab[..., 1] * yf + g_aab[..., 2] * zf_1
+    dot_bab = g_bab[..., 0] * xf_1 + g_bab[..., 1] * yf + g_bab[..., 2] * zf_1
+    dot_abb = g_abb[..., 0] * xf + g_abb[..., 1] * yf_1 + g_abb[..., 2] * zf_1
+    dot_bbb = g_bbb[..., 0] * xf_1 + g_bbb[..., 1] * yf_1 + g_bbb[..., 2] * zf_1
+
+    u = _fade(xf)
+    v = _fade(yf)
+    w = _fade(zf)
+
+    x1 = _lerp(dot_aaa, dot_baa, u)
+    x2 = _lerp(dot_aba, dot_bba, u)
+    y1 = _lerp(x1, x2, v)
+
+    x3 = _lerp(dot_aab, dot_bab, u)
+    x4 = _lerp(dot_abb, dot_bbb, u)
+    y2 = _lerp(x3, x4, v)
+
+    return _lerp(y1, y2, w)
+
+
+def _fractal_perlin(size, seed, frequency, octaves, persistence, lacunarity, device):
+    if len(size) not in (2, 3):
+        raise ValueError("Perlin noise supports 2D or 3D shapes")
+
+    noise_dtype = torch.float32
+    coords = _coordinate_grid(size, device, noise_dtype)
+
+    total = torch.zeros(size, dtype=noise_dtype, device=device)
+    amplitude = 1.0
+    max_amplitude = 0.0
+    freq = frequency
+
+    for octave in range(octaves):
+        perm = _generate_permutation(seed + octave, device)
+
+        scaled_coords = [coord * freq for coord in coords]
+
+        if len(size) == 2:
+            octave_noise = _perlin_2d(scaled_coords[1], scaled_coords[0], perm, noise_dtype)
+        else:
+            octave_noise = _perlin_3d(scaled_coords[2], scaled_coords[1], scaled_coords[0], perm, noise_dtype)
+
+        total = total + octave_noise * amplitude
+        max_amplitude += amplitude
+        amplitude *= persistence
+        freq *= lacunarity
+
+    if max_amplitude > 0:
+        total = total / max_amplitude
+
+    return total
+
+
+def _normalize_noise_tensor(noise):
+    mean = torch.mean(noise)
+    std = torch.std(noise)
+    if std > 1e-6:
+        return (noise - mean) / std
+    return noise - mean
+
+
+def _normalized_meshgrid(height, width, device, dtype):
+    ys = torch.linspace(-1.0, 1.0, steps=height, device=device, dtype=dtype)
+    xs = torch.linspace(-1.0, 1.0, steps=width, device=device, dtype=dtype)
+    return torch.meshgrid(ys, xs, indexing="ij")
+
+
+def _swirl_grid(base_y, base_x, center_x, center_y, strength, radius, direction):
+    radius = max(radius, 1e-3)
+    dx = base_x - center_x
+    dy = base_y - center_y
+    r = torch.sqrt(dx * dx + dy * dy)
+    falloff = torch.exp(-torch.square(r / radius))
+    angle = direction * strength * falloff
+    sin_a = torch.sin(angle)
+    cos_a = torch.cos(angle)
+    x_new = dx * cos_a - dy * sin_a + center_x
+    y_new = dx * sin_a + dy * cos_a + center_y
+    grid = torch.stack((x_new, y_new), dim=-1)
+    return torch.clamp(grid, -1.0, 1.0)
+
+
 def slerp(val, low, high):
     """
     Robust, batch-aware Spherical Linear Interpolation for PyTorch tensors.
@@ -416,6 +640,226 @@ class LatentAddNoise:
 
         out = latent.copy()
         out["samples"] = noised_latent.cpu()
+
+        return (out,)
+
+
+class LatentPerlinFractalNoise:
+    """Adds smooth fractal Perlin noise to latent tensors for structured variation."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "frequency": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 0.01,
+                    "max": 64.0,
+                    "step": 0.01,
+                    "tooltip": "Base lattice frequency. Higher values produce finer details."
+                }),
+                "octaves": ("INT", {
+                    "default": 4,
+                    "min": 1,
+                    "max": 12,
+                    "tooltip": "Number of noise layers to accumulate."
+                }),
+                "persistence": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Amplitude multiplier between octaves."
+                }),
+                "lacunarity": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 1.0,
+                    "max": 6.0,
+                    "step": 0.1,
+                    "tooltip": "Frequency multiplier between octaves."
+                }),
+                "strength": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 5.0,
+                    "step": 0.01,
+                    "tooltip": "Scales the normalized noise relative to the latent's standard deviation."
+                }),
+                "channel_mode": (["shared", "per_channel"], {
+                    "default": "shared",
+                    "tooltip": "Shared noise across channels or unique noise per channel."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "add_perlin_noise"
+    CATEGORY = "Latent/Noise"
+
+    def add_perlin_noise(self, latent, seed, frequency, octaves, persistence, lacunarity, strength, channel_mode):
+        if strength == 0.0:
+            return (latent,)
+
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+        is_video = latent_tensor.dim() == 5
+
+        if is_video:
+            dims = (latent_tensor.shape[2], latent_tensor.shape[3], latent_tensor.shape[4])
+        else:
+            dims = (latent_tensor.shape[-2], latent_tensor.shape[-1])
+
+        batch = latent_tensor.shape[0]
+        channels = latent_tensor.shape[1]
+
+        output = latent_tensor.clone()
+
+        for batch_index in range(batch):
+            sample = latent_tensor[batch_index]
+            sample_std = torch.std(sample.float())
+
+            if channel_mode == "shared":
+                noise = _fractal_perlin(dims, seed + batch_index, frequency, octaves, persistence, lacunarity, device)
+                noise = _normalize_noise_tensor(noise)
+
+                if is_video:
+                    noise = noise.unsqueeze(0).expand(channels, dims[0], dims[1], dims[2])
+                else:
+                    noise = noise.unsqueeze(0).expand(channels, dims[-2], dims[-1])
+            else:
+                if is_video:
+                    noise = torch.zeros((channels, dims[0], dims[1], dims[2]), dtype=torch.float32, device=device)
+                else:
+                    noise = torch.zeros((channels, dims[-2], dims[-1]), dtype=torch.float32, device=device)
+
+                for channel_index in range(channels):
+                    channel_seed = seed + batch_index * 997 + channel_index * 1013
+                    channel_noise = _fractal_perlin(dims, channel_seed, frequency, octaves, persistence, lacunarity, device)
+                    noise[channel_index] = _normalize_noise_tensor(channel_noise)
+
+            scale = sample_std * strength
+            scaled_noise = (noise * scale).to(sample.dtype)
+            output[batch_index] = sample + scaled_noise
+
+        out = latent.copy()
+        out["samples"] = output.cpu()
+
+        return (out,)
+
+
+class LatentSwirlNoise:
+    """Swirls latent pixels around randomized centers for vortex-like perturbations."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "strength": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 6.28,
+                    "step": 0.01,
+                    "tooltip": "Peak swirl rotation in radians near the vortex center."
+                }),
+                "radius": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.05,
+                    "max": 2.0,
+                    "step": 0.01,
+                    "tooltip": "Normalized radius controlling how far the vortex influence extends."
+                }),
+                "center_spread": ("FLOAT", {
+                    "default": 0.25,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "How far the vortex origin drifts from the latent center."
+                }),
+                "direction_bias": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -1.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "Bias toward counter-clockwise (1) or clockwise (-1) swirl."
+                }),
+                "mix": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Blend between original latent (0) and fully swirled result (1)."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "add_swirl_noise"
+    CATEGORY = "Latent/Noise"
+
+    def add_swirl_noise(self, latent, seed, strength, radius, center_spread, direction_bias, mix):
+        if strength == 0.0 or mix == 0.0:
+            return (latent,)
+
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+        is_video = latent_tensor.dim() == 5
+
+        if is_video:
+            batch, channels, frames, height, width = latent_tensor.shape
+            working = latent_tensor.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, height, width)
+        else:
+            batch, channels, height, width = latent_tensor.shape
+            frames = 1
+            working = latent_tensor
+
+        base_dtype = torch.float32
+        base_y, base_x = _normalized_meshgrid(height, width, device, base_dtype)
+        result = torch.empty_like(working)
+
+        center_spread = max(0.0, min(center_spread, 1.0))
+        mix = max(0.0, min(mix, 1.0))
+        bias_threshold = max(0.0, min(1.0, (direction_bias + 1.0) * 0.5))
+
+        cpu_generator = torch.Generator(device="cpu").manual_seed(seed)
+
+        total = working.shape[0]
+
+        for idx in range(total):
+            rand_vals = torch.rand(3, generator=cpu_generator)
+            offsets = (rand_vals[:2] * 2.0 - 1.0) * center_spread
+            center_y = offsets[0].item()
+            center_x = offsets[1].item()
+            direction = 1.0 if rand_vals[2].item() < bias_threshold else -1.0
+
+            grid = _swirl_grid(base_y, base_x, center_x, center_y, strength, radius, direction).unsqueeze(0)
+
+            sample = working[idx:idx + 1]
+            warped = F.grid_sample(
+                sample.to(base_dtype),
+                grid,
+                mode="bilinear",
+                padding_mode="reflection",
+                align_corners=True,
+            )
+
+            warped = warped.to(sample.dtype)
+
+            if mix >= 1.0:
+                combined = warped
+            else:
+                combined = sample + (warped - sample) * mix
+
+            result[idx] = combined[0]
+
+        if is_video:
+            result = result.reshape(batch, frames, channels, height, width).permute(0, 2, 1, 3, 4)
+
+        out = latent.copy()
+        out["samples"] = result.cpu()
 
         return (out,)
 
@@ -829,6 +1273,8 @@ NODE_CLASS_MAPPINGS = {
     "LatentGaussianBlur": LatentGaussianBlur,
     "LatentFrequencySplit": LatentFrequencySplit,
     "LatentAddNoise": LatentAddNoise,
+    "LatentPerlinFractalNoise": LatentPerlinFractalNoise,
+    "LatentSwirlNoise": LatentSwirlNoise,
     "LatentForwardDiffusion": LatentForwardDiffusion,
     "LatentHybridInverter": LatentHybridInverter,
     "ConditioningAddNoise": ConditioningAddNoise,
@@ -843,6 +1289,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentGaussianBlur": "Latent Gaussian Blur",
     "LatentFrequencySplit": "Latent Frequency Split",
     "LatentAddNoise": "Add Latent Noise (Seeded)",
+    "LatentPerlinFractalNoise": "Latent Perlin Fractal Noise",
+    "LatentSwirlNoise": "Latent Swirl Noise",
     "LatentForwardDiffusion": "Forward Diffusion (Add Scheduled Noise)",
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",
     "ConditioningAddNoise": "Conditioning (Add Noise)",
