@@ -216,17 +216,26 @@ def _normalized_meshgrid(height, width, device, dtype):
     return torch.meshgrid(ys, xs, indexing="ij")
 
 
-def _swirl_grid(base_y, base_x, center_x, center_y, strength, radius, direction):
-    radius = max(radius, 1e-3)
-    dx = base_x - center_x
-    dy = base_y - center_y
-    r = torch.sqrt(dx * dx + dy * dy)
-    falloff = torch.exp(-torch.square(r / radius))
-    angle = direction * strength * falloff
-    sin_a = torch.sin(angle)
-    cos_a = torch.cos(angle)
-    x_new = dx * cos_a - dy * sin_a + center_x
-    y_new = dx * sin_a + dy * cos_a + center_y
+def _swirl_grid(base_y, base_x, vortices):
+    total_dx = torch.zeros_like(base_x)
+    total_dy = torch.zeros_like(base_y)
+
+    for center_x, center_y, strength, radius, direction in vortices:
+        radius = max(radius, 1e-3)
+        dx = base_x - center_x
+        dy = base_y - center_y
+        r = torch.sqrt(dx * dx + dy * dy)
+        falloff = torch.exp(-torch.square(r / radius))
+        angle = direction * strength * falloff
+        sin_a = torch.sin(angle)
+        cos_a = torch.cos(angle)
+        rotated_dx = dx * cos_a - dy * sin_a
+        rotated_dy = dx * sin_a + dy * cos_a
+        total_dx = total_dx + (rotated_dx - dx)
+        total_dy = total_dy + (rotated_dy - dy)
+
+    x_new = base_x + total_dx
+    y_new = base_y + total_dy
     grid = torch.stack((x_new, y_new), dim=-1)
     return torch.clamp(grid, -1.0, 1.0)
 
@@ -758,6 +767,12 @@ class LatentSwirlNoise:
             "required": {
                 "latent": ("LATENT",),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "vortices": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 16,
+                    "tooltip": "Number of independent vortex centres to spawn per latent."
+                }),
                 "strength": ("FLOAT", {
                     "default": 0.75,
                     "min": 0.0,
@@ -800,7 +815,7 @@ class LatentSwirlNoise:
     FUNCTION = "add_swirl_noise"
     CATEGORY = "Latent/Noise"
 
-    def add_swirl_noise(self, latent, seed, strength, radius, center_spread, direction_bias, mix):
+    def add_swirl_noise(self, latent, seed, vortices, strength, radius, center_spread, direction_bias, mix):
         if strength == 0.0 or mix == 0.0:
             return (latent,)
 
@@ -823,19 +838,24 @@ class LatentSwirlNoise:
         center_spread = max(0.0, min(center_spread, 1.0))
         mix = max(0.0, min(mix, 1.0))
         bias_threshold = max(0.0, min(1.0, (direction_bias + 1.0) * 0.5))
+        vortex_count = max(1, int(vortices))
 
         cpu_generator = torch.Generator(device="cpu").manual_seed(seed)
 
         total = working.shape[0]
 
         for idx in range(total):
-            rand_vals = torch.rand(3, generator=cpu_generator)
-            offsets = (rand_vals[:2] * 2.0 - 1.0) * center_spread
-            center_y = offsets[0].item()
-            center_x = offsets[1].item()
-            direction = 1.0 if rand_vals[2].item() < bias_threshold else -1.0
+            rand_vals = torch.rand((vortex_count, 3), generator=cpu_generator)
+            vortex_params = []
 
-            grid = _swirl_grid(base_y, base_x, center_x, center_y, strength, radius, direction).unsqueeze(0)
+            for vortex_idx in range(vortex_count):
+                offsets = (rand_vals[vortex_idx, :2] * 2.0 - 1.0) * center_spread
+                center_y = offsets[0].item()
+                center_x = offsets[1].item()
+                direction = 1.0 if rand_vals[vortex_idx, 2].item() < bias_threshold else -1.0
+                vortex_params.append((center_x, center_y, float(strength), float(radius), direction))
+
+            grid = _swirl_grid(base_y, base_x, vortex_params).unsqueeze(0)
 
             sample = working[idx:idx + 1]
             warped = F.grid_sample(
