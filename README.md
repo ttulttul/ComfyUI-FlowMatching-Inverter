@@ -122,6 +122,10 @@ Treat each slider as a brushstroke: push a setting until it breaks, back off to 
 2. Run the latent through `Latent Hybrid Inverter` with your preferred strength and blend factor.
 3. Sample the result with `denoise` matching the passed strength.
 
+### Combination example
+
+Check `Examples/Combination Example.png` for a full workflow that combines the inverter, simplex and Worley noise, reaction-diffusion, and fBm nodes. The diagram illustrates how to stage noise injection around the hybrid inverter and how the new `temporal_mode`/`channel_mode` options keep video latents coherent while still layering rich structure.
+
 ## Installation
 
 1. Clone or download this repository into `ComfyUI/custom_nodes/`.
