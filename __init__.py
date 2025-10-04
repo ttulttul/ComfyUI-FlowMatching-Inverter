@@ -236,20 +236,22 @@ def _simplex_noise_2d(x, y, perm, dtype):
     gi1 = perm[ii + i1_int + perm[jj + j1_int]] % 12
     gi2 = perm[ii + 1 + perm[jj + 1]] % 12
 
+    inv_sqrt2 = 1.0 / math.sqrt(2.0)
+
     gradients = torch.tensor(
         [
-            [1, 1],
-            [-1, 1],
-            [1, -1],
-            [-1, -1],
-            [1, 0],
-            [-1, 0],
-            [0, 1],
-            [0, -1],
-            [1, 1] / math.sqrt(2.0),
-            [-1, 1] / math.sqrt(2.0),
-            [1, -1] / math.sqrt(2.0),
-            [-1, -1] / math.sqrt(2.0),
+            [1.0, 1.0],
+            [-1.0, 1.0],
+            [1.0, -1.0],
+            [-1.0, -1.0],
+            [1.0, 0.0],
+            [-1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, -1.0],
+            [inv_sqrt2, inv_sqrt2],
+            [-inv_sqrt2, inv_sqrt2],
+            [inv_sqrt2, -inv_sqrt2],
+            [-inv_sqrt2, -inv_sqrt2],
         ],
         dtype=dtype,
         device=x.device,
