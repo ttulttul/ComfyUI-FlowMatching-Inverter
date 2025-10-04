@@ -202,6 +202,282 @@ def _fractal_perlin(size, seed, frequency, octaves, persistence, lacunarity, dev
     return total
 
 
+
+def _simplex_noise_2d(x, y, perm, dtype):
+    F2 = 0.5 * (math.sqrt(3.0) - 1.0)
+    G2 = (3.0 - math.sqrt(3.0)) / 6.0
+
+    s = (x + y) * F2
+    i = torch.floor(x + s)
+    j = torch.floor(y + s)
+
+    t = (i + j) * G2
+    X0 = i - t
+    Y0 = j - t
+    x0 = x - X0
+    y0 = y - Y0
+
+    cond = x0 > y0
+    i1 = torch.where(cond, torch.ones_like(x0), torch.zeros_like(x0))
+    j1 = torch.where(cond, torch.zeros_like(y0), torch.ones_like(y0))
+
+    x1 = x0 - i1 + G2
+    y1 = y0 - j1 + G2
+    x2 = x0 - 1.0 + 2.0 * G2
+    y2 = y0 - 1.0 + 2.0 * G2
+
+    ii = torch.remainder(i.to(torch.int64), 256)
+    jj = torch.remainder(j.to(torch.int64), 256)
+
+    i1_int = i1.to(torch.int64)
+    j1_int = j1.to(torch.int64)
+
+    gi0 = perm[ii + perm[jj]] % 12
+    gi1 = perm[ii + i1_int + perm[jj + j1_int]] % 12
+    gi2 = perm[ii + 1 + perm[jj + 1]] % 12
+
+    gradients = torch.tensor(
+        [
+            [1, 1],
+            [-1, 1],
+            [1, -1],
+            [-1, -1],
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+            [1, 1] / math.sqrt(2.0),
+            [-1, 1] / math.sqrt(2.0),
+            [1, -1] / math.sqrt(2.0),
+            [-1, -1] / math.sqrt(2.0),
+        ],
+        dtype=dtype,
+        device=x.device,
+    )
+
+    def contribution(t_comp, gx, gy, x_comp, y_comp):
+        mask = t_comp > 0
+        t_term = torch.zeros_like(t_comp)
+        if mask.any():
+            t_square = t_comp[mask] * t_comp[mask]
+            t_four = t_square * t_square
+            dot = gx[mask] * x_comp[mask] + gy[mask] * y_comp[mask]
+            t_term[mask] = t_four * dot
+        return t_term
+
+    g0 = gradients[gi0]
+    g1 = gradients[gi1]
+    g2 = gradients[gi2]
+
+    t0 = 0.5 - x0 * x0 - y0 * y0
+    t1 = 0.5 - x1 * x1 - y1 * y1
+    t2 = 0.5 - x2 * x2 - y2 * y2
+
+    n0 = contribution(t0, g0[..., 0], g0[..., 1], x0, y0)
+    n1 = contribution(t1, g1[..., 0], g1[..., 1], x1, y1)
+    n2 = contribution(t2, g2[..., 0], g2[..., 1], x2, y2)
+
+    return 70.0 * (n0 + n1 + n2)
+
+
+def _fractal_simplex(size, seed, frequency, octaves, persistence, lacunarity, device):
+    if len(size) != 2:
+        raise ValueError("Simplex noise is implemented for 2D shapes")
+
+    dtype = torch.float32
+    coords = _coordinate_grid(size, device, dtype)
+
+    total = torch.zeros(size, dtype=dtype, device=device)
+    amplitude = 1.0
+    max_amplitude = 0.0
+    freq = frequency
+
+    for octave in range(octaves):
+        perm = _generate_permutation(seed + octave, device)
+        x = coords[1] * freq
+        y = coords[0] * freq
+        octave_noise = _simplex_noise_2d(x, y, perm, dtype)
+        total = total + octave_noise * amplitude
+        max_amplitude += amplitude
+        amplitude *= persistence
+        freq *= lacunarity
+
+    if max_amplitude > 0:
+        total = total / max_amplitude
+
+    return total
+
+
+def _worley_noise(size, seed, feature_points, metric, jitter, device):
+    if len(size) != 2:
+        raise ValueError("Worley noise expects a 2D shape")
+
+    height, width = size
+    dtype = torch.float32
+    cpu_gen = torch.Generator(device="cpu").manual_seed(seed)
+    points = torch.rand((feature_points, 2), generator=cpu_gen, dtype=dtype)
+
+    if jitter > 0.0:
+        jitter_gen = torch.rand((feature_points, 2), generator=cpu_gen, dtype=dtype) - 0.5
+        points = torch.clamp(points + jitter_gen * jitter, 0.0, 1.0)
+
+    points = points.to(device=device)
+
+    ys = torch.linspace(0.0, 1.0, steps=height, device=device, dtype=dtype)
+    xs = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=dtype)
+    grid_y = ys.view(height, 1, 1)
+    grid_x = xs.view(1, width, 1)
+
+    diff_y = grid_y - points[:, 1]
+    diff_x = grid_x - points[:, 0]
+
+    diff = torch.stack((diff_x, diff_y), dim=-1)
+
+    if metric == "manhattan":
+        distances = diff.abs().sum(dim=-1)
+    elif metric == "chebyshev":
+        distances = diff.abs().max(dim=-1).values
+    else:
+        distances = torch.sqrt((diff * diff).sum(dim=-1))
+
+    min_dist = distances.min(dim=-1).values
+    max_dist = torch.max(min_dist)
+    if max_dist > 0:
+        min_dist = min_dist / max_dist
+
+    return 1.0 - min_dist
+
+
+def _fractal_worley(size, seed, base_points, octaves, persistence, lacunarity, metric, jitter, device):
+    dtype = torch.float32
+    total = torch.zeros(size, dtype=dtype, device=device)
+    amplitude = 1.0
+    max_amplitude = 0.0
+    points = base_points
+
+    for octave in range(octaves):
+        octave_points = max(1, int(round(points)))
+        noise = _worley_noise(size, seed + octave, octave_points, metric, jitter, device)
+        total = total + noise * amplitude
+        max_amplitude += amplitude
+        amplitude *= persistence
+        points *= lacunarity
+
+    if max_amplitude > 0:
+        total = total / max_amplitude
+
+    return total * 2.0 - 1.0
+
+
+def _gray_scott_pattern(size, seed, steps, feed, kill, diff_u, diff_v, dt, device):
+    if len(size) != 2:
+        raise ValueError("Gray-Scott pattern expects a 2D shape")
+
+    height, width = size
+    dtype = torch.float32
+
+    U = torch.ones((1, 1, height, width), device=device, dtype=dtype)
+    V = torch.zeros((1, 1, height, width), device=device, dtype=dtype)
+
+    cpu_gen = torch.Generator(device="cpu").manual_seed(seed)
+    noise = torch.rand((height, width), generator=cpu_gen, dtype=dtype)
+    noise = noise.to(device=device)
+
+    U = U - 0.5 * noise.unsqueeze(0).unsqueeze(0)
+    V = V + 0.5 * noise.unsqueeze(0).unsqueeze(0)
+
+    square = max(2, min(height, width) // 10)
+    start_y = height // 2 - square // 2
+    start_x = width // 2 - square // 2
+    V[:, :, start_y:start_y + square, start_x:start_x + square] = 1.0
+    U[:, :, start_y:start_y + square, start_x:start_x + square] = 0.0
+
+    lap_kernel = torch.tensor(
+        [[0.05, 0.2, 0.05], [0.2, -1.0, 0.2], [0.05, 0.2, 0.05]],
+        dtype=dtype,
+        device=device,
+    ).view(1, 1, 3, 3)
+
+    for _ in range(steps):
+        U_pad = torch.nn.functional.pad(U, (1, 1, 1, 1), mode="reflect")
+        V_pad = torch.nn.functional.pad(V, (1, 1, 1, 1), mode="reflect")
+        lap_u = torch.nn.functional.conv2d(U_pad, lap_kernel)
+        lap_v = torch.nn.functional.conv2d(V_pad, lap_kernel)
+
+        reaction = U * V * V
+        U = U + (diff_u * lap_u - reaction + feed * (1.0 - U)) * dt
+        V = V + (diff_v * lap_v + reaction - (feed + kill) * V) * dt
+
+        U = torch.clamp(U, 0.0, 1.0)
+        V = torch.clamp(V, 0.0, 1.0)
+
+    pattern = V.squeeze(0).squeeze(0)
+    return _normalize_noise_tensor(pattern)
+
+
+def _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator):
+    if strength == 0.0:
+        return latent_tensor
+
+    with torch.no_grad():
+        device = latent_tensor.device
+        is_video = latent_tensor.dim() == 5
+        if is_video:
+            batch, channels, frames, height, width = latent_tensor.shape
+        else:
+            batch, channels, height, width = latent_tensor.shape
+            frames = 1
+
+        output = latent_tensor.clone()
+
+        for batch_index in range(batch):
+            sample = latent_tensor[batch_index]
+            sample_std = torch.std(sample.float())
+            scale = sample_std.item() * strength if sample_std > 1e-6 else strength
+
+            if channel_mode == "shared":
+                if is_video:
+                    if temporal_mode == "locked":
+                        base_noise = generator((height, width), seed + batch_index)
+                        base_noise = _normalize_noise_tensor(base_noise)
+                        noise = base_noise.unsqueeze(0).unsqueeze(0).expand(channels, frames, height, width).clone()
+                    else:
+                        noise = torch.zeros((channels, frames, height, width), dtype=torch.float32, device=device)
+                        for frame_index in range(frames):
+                            frame_seed = seed + batch_index + frame_index * 131
+                            frame_noise = generator((height, width), frame_seed)
+                            frame_plane = _normalize_noise_tensor(frame_noise).unsqueeze(0).expand(channels, height, width)
+                            noise[:, frame_index] = frame_plane.clone()
+                else:
+                    base_noise = generator((height, width), seed + batch_index)
+                    base_noise = _normalize_noise_tensor(base_noise)
+                    noise = base_noise.unsqueeze(0).expand(channels, height, width).clone()
+            else:
+                if is_video:
+                    noise = torch.zeros((channels, frames, height, width), dtype=torch.float32, device=device)
+                    for channel_index in range(channels):
+                        channel_seed = seed + batch_index * 997 + channel_index * 1013
+                        if temporal_mode == "locked":
+                            channel_noise = generator((height, width), channel_seed)
+                            normalized = _normalize_noise_tensor(channel_noise)
+                            noise[channel_index] = normalized.unsqueeze(0).expand(frames, height, width).clone()
+                        else:
+                            for frame_index in range(frames):
+                                frame_seed = channel_seed + frame_index * 131
+                                frame_noise = generator((height, width), frame_seed)
+                                noise[channel_index, frame_index] = _normalize_noise_tensor(frame_noise)
+                else:
+                    noise = torch.zeros((channels, height, width), dtype=torch.float32, device=device)
+                    for channel_index in range(channels):
+                        channel_seed = seed + batch_index * 997 + channel_index * 1013
+                        channel_noise = generator((height, width), channel_seed)
+                        noise[channel_index] = _normalize_noise_tensor(channel_noise)
+
+            scaled_noise = (noise * scale).to(sample.dtype)
+            output[batch_index] = sample + scaled_noise
+
+    return output
+
 def _normalize_noise_tensor(noise):
     mean = torch.mean(noise)
     std = torch.std(noise)
@@ -755,6 +1031,162 @@ class LatentPerlinFractalNoise:
         out = latent.copy()
         out["samples"] = output.cpu()
 
+        return (out,)
+
+
+class LatentSimplexNoise:
+    """Applies layered simplex noise for organic latent perturbations."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT", {"tooltip": "Latent to perturb with simplex noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed controlling the simplex lattice offsets."}),
+                "frequency": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 64.0, "step": 0.01, "tooltip": "Base lattice frequency for the simplex grid."}),
+                "octaves": ("INT", {"default": 4, "min": 1, "max": 12, "tooltip": "Number of simplex layers to accumulate."}),
+                "persistence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amplitude multiplier applied between octaves."}),
+                "lacunarity": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 6.0, "step": 0.1, "tooltip": "Frequency multiplier applied between octaves."}),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized simplex noise relative to the latent's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Reuse a single noise field for all channels or reseed per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reruns the same pattern per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "add_simplex_noise"
+    CATEGORY = "Latent/Noise"
+
+    def add_simplex_noise(self, latent, seed, frequency, octaves, persistence, lacunarity, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+
+        generator = lambda size, noise_seed: _fractal_simplex(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+        output = _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        out = latent.copy()
+        out["samples"] = output.cpu()
+        return (out,)
+
+
+class LatentWorleyNoise:
+    """Generates cellular Worley noise for cracked or biological textures."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT", {"tooltip": "Latent to perturb with Worley (cellular) noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the feature point distribution."}),
+                "feature_points": ("INT", {"default": 16, "min": 1, "max": 4096, "tooltip": "Base number of feature points scattered across the plane."}),
+                "octaves": ("INT", {"default": 3, "min": 1, "max": 8, "tooltip": "Number of cellular layers to accumulate."}),
+                "persistence": ("FLOAT", {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amplitude multiplier between Worley octaves."}),
+                "lacunarity": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 6.0, "step": 0.1, "tooltip": "Multiplier for the feature point count between octaves."}),
+                "distance_metric": (["euclidean", "manhattan", "chebyshev"], {"default": "euclidean", "tooltip": "Distance metric used when measuring feature proximity."}),
+                "jitter": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How far feature points can drift inside each cell."}),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized Worley noise relative to the latent's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Shared noise for all channels or reseeded per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reuses a single noise pattern per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "add_worley_noise"
+    CATEGORY = "Latent/Noise"
+
+    def add_worley_noise(self, latent, seed, feature_points, octaves, persistence, lacunarity, distance_metric, jitter, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+
+        base_points = float(max(1, feature_points))
+        generator = lambda size, noise_seed: _fractal_worley(size, noise_seed, base_points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+        output = _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        out = latent.copy()
+        out["samples"] = output.cpu()
+        return (out,)
+
+
+class LatentReactionDiffusion:
+    """Runs a Gray-Scott reaction-diffusion simulation and injects the resulting pattern."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT", {"tooltip": "Latent that will receive reaction-diffusion patterns."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the initial chemical concentrations."}),
+                "iterations": ("INT", {"default": 200, "min": 1, "max": 2000, "tooltip": "Number of Gray-Scott simulation steps."}),
+                "feed_rate": ("FLOAT", {"default": 0.036, "min": 0.0, "max": 0.1, "step": 0.001, "tooltip": "Feed rate (F) controlling how quickly chemical U is replenished."}),
+                "kill_rate": ("FLOAT", {"default": 0.065, "min": 0.0, "max": 0.1, "step": 0.001, "tooltip": "Kill rate (K) regulating removal of chemical V."}),
+                "diffusion_u": ("FLOAT", {"default": 0.16, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Diffusion rate for chemical U."}),
+                "diffusion_v": ("FLOAT", {"default": 0.08, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Diffusion rate for chemical V."}),
+                "time_step": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.01, "tooltip": "Simulation time step used during integration."}),
+                "strength": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized pattern relative to the latent's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Reuse one simulation for all channels or rerun per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reuses the same pattern for every frame; animated reruns the simulation per frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "add_reaction_diffusion"
+    CATEGORY = "Latent/Noise"
+
+    def add_reaction_diffusion(self, latent, seed, iterations, feed_rate, kill_rate, diffusion_u, diffusion_v, time_step, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+
+        generator = lambda size, noise_seed: _gray_scott_pattern(size, noise_seed, iterations, feed_rate, kill_rate, diffusion_u, diffusion_v, time_step, device)
+        output = _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        out = latent.copy()
+        out["samples"] = output.cpu()
+        return (out,)
+
+
+class LatentFractalBrownianMotion:
+    """Builds fractal Brownian motion from a selectable base noise and injects it into the latent."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT", {"tooltip": "Latent to enrich with fractal Brownian motion."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the base noise generator."}),
+                "base_noise": (["simplex", "perlin", "worley"], {"default": "simplex", "tooltip": "Noise primitive accumulated by the fBm stack."}),
+                "frequency": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 64.0, "step": 0.01, "tooltip": "Fundamental frequency for simplex/perlin bases (acts as a multiplier for Worley)."}),
+                "feature_points": ("INT", {"default": 16, "min": 1, "max": 4096, "tooltip": "Base feature point count (used when base noise is Worley)."}),
+                "octaves": ("INT", {"default": 5, "min": 1, "max": 12, "tooltip": "Number of fBm layers to accumulate."}),
+                "persistence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amplitude multiplier between fBm layers."}),
+                "lacunarity": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 6.0, "step": 0.1, "tooltip": "Frequency multiplier between fBm layers."}),
+                "distance_metric": (["euclidean", "manhattan", "chebyshev"], {"default": "euclidean", "tooltip": "Distance metric used when the base noise is Worley."}),
+                "jitter": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Feature jitter amount for Worley base noise."}),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized fBm field relative to the latent's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Shared fBm field per sample or reseeded per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reuses the same fBm per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "add_fbm_noise"
+    CATEGORY = "Latent/Noise"
+
+    def add_fbm_noise(self, latent, seed, base_noise, frequency, feature_points, octaves, persistence, lacunarity, distance_metric, jitter, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        latent_tensor = latent["samples"].clone().to(device)
+
+        def generator(size, noise_seed):
+            if base_noise == "perlin":
+                return _fractal_perlin(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+            if base_noise == "worley":
+                points = float(max(1, feature_points)) * max(frequency, 0.01)
+                return _fractal_worley(size, noise_seed, points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+            return _fractal_simplex(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+
+        output = _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        out = latent.copy()
+        out["samples"] = output.cpu()
         return (out,)
 
 
@@ -1349,6 +1781,10 @@ NODE_CLASS_MAPPINGS = {
     "LatentFrequencySplit": LatentFrequencySplit,
     "LatentAddNoise": LatentAddNoise,
     "LatentPerlinFractalNoise": LatentPerlinFractalNoise,
+    "LatentSimplexNoise": LatentSimplexNoise,
+    "LatentWorleyNoise": LatentWorleyNoise,
+    "LatentReactionDiffusion": LatentReactionDiffusion,
+    "LatentFractalBrownianMotion": LatentFractalBrownianMotion,
     "LatentSwirlNoise": LatentSwirlNoise,
     "LatentForwardDiffusion": LatentForwardDiffusion,
     "LatentHybridInverter": LatentHybridInverter,
@@ -1365,6 +1801,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentFrequencySplit": "Latent Frequency Split",
     "LatentAddNoise": "Add Latent Noise (Seeded)",
     "LatentPerlinFractalNoise": "Latent Perlin Fractal Noise",
+    "LatentSimplexNoise": "Latent Simplex Noise",
+    "LatentWorleyNoise": "Latent Worley Noise",
+    "LatentReactionDiffusion": "Latent Reaction-Diffusion",
+    "LatentFractalBrownianMotion": "Latent Fractal Brownian Motion",
     "LatentSwirlNoise": "Latent Swirl Noise",
     "LatentForwardDiffusion": "Forward Diffusion (Add Scheduled Noise)",
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",

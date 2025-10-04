@@ -36,6 +36,22 @@ Adds seeded Gaussian noise scaled by the input latent's standard deviation. Usef
 
 Generates smooth octave-based Perlin noise and adds it to the latent. Tune the base frequency, octaves, persistence, and lacunarity to decide whether you want broad undulations or fine stippling, and choose between shared or per-channel fields for subtle colour-channel offsets.
 
+### Latent Simplex Noise
+
+Produces layered simplex noise—Perlin's successor—for isotropic, artifact-free texture. Frequency, octaves, persistence, and lacunarity work just like the Perlin node, while `temporal_mode` lets you keep the same pattern across video frames (`locked`) or reseed each frame (`animated`).
+
+### Latent Worley Noise
+
+Synthesises cellular Worley (Voronoi) patterns by scattering seeded feature points. Adjust the point count, distance metric, and jitter to morph between cracked clay, reptilian scales, or bubbly foams. Combine with animated mode to introduce evolving cellular motion in video latents.
+
+### Latent Reaction-Diffusion
+
+Runs a Gray–Scott reaction-diffusion simulation in latent space to generate self-organising Turing patterns. Feed, kill, and diffusion controls expose the classic Gray–Scott parameter space; `temporal_mode` toggles between a single locked pattern and re-simulating per frame.
+
+### Latent Fractal Brownian Motion
+
+Wraps any of the base noise primitives (simplex, Perlin, or Worley) in an fBm stack to build rich multi-scale detail. Combine frequency, octaves, persistence, and lacunarity to decide how aggressively the layers accumulate, and pick Worley for cellular fBm, Perlin for smooth ridges, or simplex for organic grain.
+
 ### Latent Swirl Noise
 
 Warps the latent around one or more seeded vortices using `grid_sample`. Choose between a global grid (shared across channels) or per-channel grids, set the fraction of channels to affect, and control vortex count, rotation, falloff radius, centre jitter, and blend to inject painterly whirlpools or gentle twisting motion where you want it.
@@ -86,6 +102,7 @@ Image exploration rarely means chasing a single "correct" answer. These nodes ar
 - Split a latent with `Latent Frequency Split`, sharpen or noise the high band while blurring the low band, then recombine via `Latent Mixer`/`Add` nodes to weave sharp detail onto soft composition.
 - Carve prompts with `Conditioning (Frequency Split)` and return them through `Conditioning (Frequency Merge)`: keep low-band text steady for the story while remapping the high band through noise, blur, or scale to emphasize only certain fragments.
 - Swap seeds between the inverter, forward diffusion, and noise nodes as you iterate. Small tweaks here can shift the interplay between latent detail and prompt guidance, rewarding playful experimentation.
+- Chase naturalistic textures by stacking `Latent Simplex Noise` or the fBm node before sampling; switch `temporal_mode` to `animated` when generating video to keep organic flicker under control. For harder cellular structures, blend in `Latent Worley Noise`, and when you need life-like stripes or spots, seed `Latent Reaction-Diffusion` with slightly different feed/kill rates to explore the Gray–Scott pattern atlas.
 
 Treat each slider as a brushstroke: push a setting until it breaks, back off to the sweet spot, and capture the happy accidents along the way.
 
