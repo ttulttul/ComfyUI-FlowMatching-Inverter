@@ -5,7 +5,56 @@ import comfy.utils
 
 import torch
 import torch.nn.functional as F
-import torchvision.transforms.functional as TF
+try:
+    import torchvision.transforms.functional as TF
+except ModuleNotFoundError:  # pragma: no cover - fallback for environments without torchvision
+    TF = None
+
+
+def _gaussian_kernel1d(kernel_size, sigma, device, dtype):
+    radius = kernel_size // 2
+    positions = torch.arange(-radius, radius + 1, device=device, dtype=dtype)
+    sigma = max(float(sigma), 1e-6)
+    kernel = torch.exp(-(positions ** 2) / (2.0 * sigma * sigma))
+    kernel = kernel / kernel.sum()
+    return kernel
+
+
+def _gaussian_blur_fallback(tensor, kernel_size, sigma):
+    if isinstance(kernel_size, int):
+        kernel_size = (kernel_size, kernel_size)
+    if isinstance(sigma, (int, float)):
+        sigma = (sigma, sigma)
+
+    ky, kx = kernel_size
+    sy, sx = sigma
+
+    if ky <= 1 and kx <= 1:
+        return tensor
+
+    device = tensor.device
+    dtype = tensor.dtype
+
+    kernel_y = _gaussian_kernel1d(ky, sy, device, dtype)
+    kernel_x = _gaussian_kernel1d(kx, sx, device, dtype)
+
+    kernel_2d = torch.outer(kernel_y, kernel_x)
+    kernel_2d = kernel_2d / kernel_2d.sum()
+    kernel = kernel_2d.view(1, 1, ky, kx)
+    channels = tensor.shape[1]
+    kernel = kernel.expand(channels, 1, ky, kx)
+
+    padding = (ky // 2, kx // 2)
+    return F.conv2d(tensor, kernel, padding=padding, groups=channels)
+
+
+if TF is None:
+    class _FunctionalFallback:
+        @staticmethod
+        def gaussian_blur(tensor, kernel_size, sigma):
+            return _gaussian_blur_fallback(tensor, kernel_size, sigma)
+
+    TF = _FunctionalFallback()
 
 
 def _fade(t):
@@ -479,6 +528,72 @@ def _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, 
 
     return output
 
+
+def _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator):
+    if strength == 0.0:
+        return image_tensor
+
+    with torch.no_grad():
+        device = image_tensor.device
+        is_video = image_tensor.dim() == 5
+
+        if is_video:
+            batch, frames, height, width, channels = image_tensor.shape
+        else:
+            batch, height, width, channels = image_tensor.shape
+            frames = 1
+
+        output = image_tensor.clone()
+
+        for batch_index in range(batch):
+            sample = image_tensor[batch_index]
+            sample_std = torch.std(sample.float())
+            scale = sample_std.item() * strength if sample_std > 1e-6 else strength
+
+            if channel_mode == "shared":
+                if is_video:
+                    if temporal_mode == "locked":
+                        base_noise = generator((height, width), seed + batch_index)
+                        base_noise = _normalize_noise_tensor(base_noise)
+                        noise = base_noise.unsqueeze(0).unsqueeze(-1).expand(frames, height, width, channels).clone()
+                    else:
+                        noise = torch.zeros((frames, height, width, channels), dtype=torch.float32, device=device)
+                        for frame_index in range(frames):
+                            frame_seed = seed + batch_index + frame_index * 131
+                            frame_noise = generator((height, width), frame_seed)
+                            frame_plane = _normalize_noise_tensor(frame_noise).unsqueeze(-1).expand(height, width, channels)
+                            noise[frame_index] = frame_plane.clone()
+                else:
+                    base_noise = generator((height, width), seed + batch_index)
+                    base_noise = _normalize_noise_tensor(base_noise)
+                    noise = base_noise.unsqueeze(-1).expand(height, width, channels).clone()
+            else:
+                if is_video:
+                    noise = torch.zeros((frames, height, width, channels), dtype=torch.float32, device=device)
+                    for channel_index in range(channels):
+                        channel_seed = seed + batch_index * 997 + channel_index * 1013
+                        if temporal_mode == "locked":
+                            channel_noise = generator((height, width), channel_seed)
+                            normalized = _normalize_noise_tensor(channel_noise)
+                            noise[:, :, :, channel_index] = normalized.unsqueeze(0).unsqueeze(-1).expand(frames, height, width)
+                        else:
+                            for frame_index in range(frames):
+                                frame_seed = channel_seed + frame_index * 131
+                                frame_noise = generator((height, width), frame_seed)
+                                noise[frame_index, :, :, channel_index] = _normalize_noise_tensor(frame_noise)
+                else:
+                    noise = torch.zeros((height, width, channels), dtype=torch.float32, device=device)
+                    for channel_index in range(channels):
+                        channel_seed = seed + batch_index * 997 + channel_index * 1013
+                        channel_noise = generator((height, width), channel_seed)
+                        noise[:, :, channel_index] = _normalize_noise_tensor(channel_noise)
+
+            scaled_noise = (noise * scale).to(sample.dtype)
+            output[batch_index] = sample + scaled_noise
+
+    return output
+
+
 def _normalize_noise_tensor(noise):
     mean = torch.mean(noise)
     std = torch.std(noise)
@@ -930,6 +1045,52 @@ class LatentAddNoise:
         return (out,)
 
 
+class ImageAddNoise:
+    """Adds seeded Gaussian noise to image tensors."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to receive additional Gaussian noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for generating repeatable noise."}),
+                "strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 10.0,
+                    "step": 0.01,
+                    "tooltip": "Strength of the noise. 1.0 adds noise with the same standard deviation as the image.",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_noise"
+    CATEGORY = "Image/Noise"
+
+    def add_noise(self, image, seed, strength):
+        if strength == 0.0:
+            return (image,)
+
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+
+        generator = torch.Generator(device=device).manual_seed(seed)
+        noise = torch.randn(
+            image_tensor.shape,
+            generator=generator,
+            device=device,
+            dtype=image_tensor.dtype,
+        )
+
+        image_std = torch.std(image_tensor)
+        scaled_noise = noise * image_std * strength
+
+        noised_image = image_tensor + scaled_noise
+
+        return (noised_image.cpu(),)
+
+
 class LatentPerlinFractalNoise:
     """Adds smooth fractal Perlin noise to latent tensors for structured variation."""
 
@@ -1035,6 +1196,68 @@ class LatentPerlinFractalNoise:
         return (out,)
 
 
+class ImagePerlinFractalNoise:
+    """Adds smooth fractal Perlin noise to images for structured variation."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image that will be perturbed with fractal Perlin noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed controlling the procedural noise pattern."}),
+                "frequency": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 0.01,
+                    "max": 64.0,
+                    "step": 0.01,
+                    "tooltip": "Base lattice frequency. Higher values produce finer details.",
+                }),
+                "octaves": ("INT", {
+                    "default": 4,
+                    "min": 1,
+                    "max": 12,
+                    "tooltip": "Number of noise layers to accumulate.",
+                }),
+                "persistence": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Amplitude multiplier between octaves.",
+                }),
+                "lacunarity": ("FLOAT", {
+                    "default": 2.0,
+                    "min": 1.0,
+                    "max": 6.0,
+                    "step": 0.1,
+                    "tooltip": "Frequency multiplier between octaves.",
+                }),
+                "strength": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 5.0,
+                    "step": 0.01,
+                    "tooltip": "Scale of the normalized noise relative to the image's standard deviation.",
+                }),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Reuse a single noise field for all channels or reseed per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reruns the same pattern per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_perlin_noise"
+    CATEGORY = "Image/Noise"
+
+    def add_perlin_noise(self, image, seed, frequency, octaves, persistence, lacunarity, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+
+        generator = lambda size, noise_seed: _fractal_perlin(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+        output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        return (output.cpu(),)
+
+
 class LatentSimplexNoise:
     """Applies layered simplex noise for organic latent perturbations."""
 
@@ -1068,6 +1291,39 @@ class LatentSimplexNoise:
         out = latent.copy()
         out["samples"] = output.cpu()
         return (out,)
+
+
+class ImageSimplexNoise:
+    """Applies layered simplex noise for organic image perturbations."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to perturb with simplex noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed controlling the simplex lattice offsets."}),
+                "frequency": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 64.0, "step": 0.01, "tooltip": "Base lattice frequency for the simplex grid."}),
+                "octaves": ("INT", {"default": 4, "min": 1, "max": 12, "tooltip": "Number of simplex layers to accumulate."}),
+                "persistence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amplitude multiplier applied between octaves."}),
+                "lacunarity": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 6.0, "step": 0.1, "tooltip": "Frequency multiplier applied between octaves."}),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized simplex noise relative to the image's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Reuse a single noise field for all channels or reseed per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reruns the same pattern per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_simplex_noise"
+    CATEGORY = "Image/Noise"
+
+    def add_simplex_noise(self, image, seed, frequency, octaves, persistence, lacunarity, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+
+        generator = lambda size, noise_seed: _fractal_simplex(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+        output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        return (output.cpu(),)
 
 
 class LatentWorleyNoise:
@@ -1108,6 +1364,42 @@ class LatentWorleyNoise:
         return (out,)
 
 
+class ImageWorleyNoise:
+    """Generates cellular Worley noise for cracked or biological image textures."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to perturb with Worley (cellular) noise."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the feature point distribution."}),
+                "feature_points": ("INT", {"default": 16, "min": 1, "max": 4096, "tooltip": "Base number of feature points scattered across the plane."}),
+                "octaves": ("INT", {"default": 3, "min": 1, "max": 8, "tooltip": "Number of cellular layers to accumulate."}),
+                "persistence": ("FLOAT", {"default": 0.65, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amplitude multiplier between Worley octaves."}),
+                "lacunarity": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 6.0, "step": 0.1, "tooltip": "Multiplier for the feature point count between octaves."}),
+                "distance_metric": (["euclidean", "manhattan", "chebyshev"], {"default": "euclidean", "tooltip": "Distance metric used when measuring feature proximity."}),
+                "jitter": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How far feature points can drift inside each cell."}),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized Worley noise relative to the image's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Shared noise for all channels or reseeded per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reuses a single noise pattern per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_worley_noise"
+    CATEGORY = "Image/Noise"
+
+    def add_worley_noise(self, image, seed, feature_points, octaves, persistence, lacunarity, distance_metric, jitter, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+
+        base_points = float(max(1, feature_points))
+        generator = lambda size, noise_seed: _fractal_worley(size, noise_seed, base_points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+        output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        return (output.cpu(),)
+
+
 class LatentReactionDiffusion:
     """Runs a Gray-Scott reaction-diffusion simulation and injects the resulting pattern."""
 
@@ -1143,6 +1435,41 @@ class LatentReactionDiffusion:
         out = latent.copy()
         out["samples"] = output.cpu()
         return (out,)
+
+
+class ImageReactionDiffusion:
+    """Runs a Gray-Scott reaction-diffusion simulation and injects the resulting pattern into an image."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image that will receive reaction-diffusion patterns."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the initial chemical concentrations."}),
+                "iterations": ("INT", {"default": 200, "min": 1, "max": 2000, "tooltip": "Number of Gray-Scott simulation steps."}),
+                "feed_rate": ("FLOAT", {"default": 0.036, "min": 0.0, "max": 0.1, "step": 0.001, "tooltip": "Feed rate (F) controlling how quickly chemical U is replenished."}),
+                "kill_rate": ("FLOAT", {"default": 0.065, "min": 0.0, "max": 0.1, "step": 0.001, "tooltip": "Kill rate (K) regulating removal of chemical V."}),
+                "diffusion_u": ("FLOAT", {"default": 0.16, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Diffusion rate for chemical U."}),
+                "diffusion_v": ("FLOAT", {"default": 0.08, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Diffusion rate for chemical V."}),
+                "time_step": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 5.0, "step": 0.01, "tooltip": "Simulation time step used during integration."}),
+                "strength": ("FLOAT", {"default": 0.75, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized pattern relative to the image's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Reuse one simulation for all channels or rerun per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reuses the same pattern for every frame; animated reruns the simulation per frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_reaction_diffusion"
+    CATEGORY = "Image/Noise"
+
+    def add_reaction_diffusion(self, image, seed, iterations, feed_rate, kill_rate, diffusion_u, diffusion_v, time_step, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+
+        generator = lambda size, noise_seed: _gray_scott_pattern(size, noise_seed, iterations, feed_rate, kill_rate, diffusion_u, diffusion_v, time_step, device)
+        output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        return (output.cpu(),)
 
 
 class LatentFractalBrownianMotion:
@@ -1189,6 +1516,50 @@ class LatentFractalBrownianMotion:
         out = latent.copy()
         out["samples"] = output.cpu()
         return (out,)
+
+
+class ImageFractalBrownianMotion:
+    """Builds fractal Brownian motion from a selectable base noise and injects it into the image."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to enrich with fractal Brownian motion."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for the base noise generator."}),
+                "base_noise": (["simplex", "perlin", "worley"], {"default": "simplex", "tooltip": "Noise primitive accumulated by the fBm stack."}),
+                "frequency": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 64.0, "step": 0.01, "tooltip": "Fundamental frequency for simplex/perlin bases (acts as a multiplier for Worley)."}),
+                "feature_points": ("INT", {"default": 16, "min": 1, "max": 4096, "tooltip": "Base feature point count (used when base noise is Worley)."}),
+                "octaves": ("INT", {"default": 5, "min": 1, "max": 12, "tooltip": "Number of fBm layers to accumulate."}),
+                "persistence": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Amplitude multiplier between fBm layers."}),
+                "lacunarity": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 6.0, "step": 0.1, "tooltip": "Frequency multiplier between fBm layers."}),
+                "distance_metric": (["euclidean", "manhattan", "chebyshev"], {"default": "euclidean", "tooltip": "Distance metric used when the base noise is Worley."}),
+                "jitter": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Feature jitter amount for Worley base noise."}),
+                "strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 5.0, "step": 0.01, "tooltip": "Scale of the normalized fBm field relative to the image's standard deviation."}),
+                "channel_mode": (["shared", "per_channel"], {"default": "shared", "tooltip": "Shared fBm field per sample or reseeded per channel."}),
+                "temporal_mode": (["locked", "animated"], {"default": "locked", "tooltip": "locked reuses the same fBm per frame; animated reseeds each frame."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_fbm_noise"
+    CATEGORY = "Image/Noise"
+
+    def add_fbm_noise(self, image, seed, base_noise, frequency, feature_points, octaves, persistence, lacunarity, distance_metric, jitter, strength, channel_mode, temporal_mode):
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+
+        def generator(size, noise_seed):
+            if base_noise == "perlin":
+                return _fractal_perlin(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+            if base_noise == "worley":
+                points = float(max(1, feature_points)) * max(frequency, 0.01)
+                return _fractal_worley(size, noise_seed, points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+            return _fractal_simplex(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
+
+        output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
+
+        return (output.cpu(),)
 
 
 class LatentSwirlNoise:
@@ -1370,6 +1741,187 @@ class LatentSwirlNoise:
         out["samples"] = result.cpu()
 
         return (out,)
+
+
+class ImageSwirlNoise:
+    """Swirls image pixels around randomized centers for vortex-like perturbations."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"tooltip": "Image to deform with vortex-style warps."}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed for vortex placement and direction randomness."}),
+                "vortices": ("INT", {
+                    "default": 1,
+                    "min": 1,
+                    "max": 16,
+                    "tooltip": "Number of independent vortex centres to spawn per image.",
+                }),
+                "channel_mode": (["global", "per_channel"], {
+                    "default": "global",
+                    "tooltip": "Use a shared swirl grid for all channels or generate unique grids per affected channel.",
+                }),
+                "channel_fraction": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Fraction of channels to swirl. The subset is randomly selected per sample.",
+                }),
+                "strength": ("FLOAT", {
+                    "default": 0.75,
+                    "min": 0.0,
+                    "max": 6.28,
+                    "step": 0.01,
+                    "tooltip": "Peak swirl rotation in radians near the vortex center.",
+                }),
+                "radius": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.05,
+                    "max": 2.0,
+                    "step": 0.01,
+                    "tooltip": "Normalized radius controlling how far the vortex influence extends.",
+                }),
+                "center_spread": ("FLOAT", {
+                    "default": 0.25,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "How far the vortex origin drifts from the image center.",
+                }),
+                "direction_bias": ("FLOAT", {
+                    "default": 0.0,
+                    "min": -1.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "Bias toward counter-clockwise (1) or clockwise (-1) swirl.",
+                }),
+                "mix": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Blend between original image (0) and fully swirled result (1).",
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "add_swirl_noise"
+    CATEGORY = "Image/Noise"
+
+    def add_swirl_noise(self, image, seed, vortices, channel_mode, channel_fraction,
+                        strength, radius, center_spread, direction_bias, mix):
+        if strength == 0.0 or mix == 0.0:
+            return (image,)
+
+        device = comfy.model_management.get_torch_device()
+        image_tensor = image.clone().to(device)
+        is_video = image_tensor.dim() == 5
+
+        if is_video:
+            batch, frames, height, width, channels = image_tensor.shape
+            working = image_tensor.permute(0, 1, 4, 2, 3).reshape(batch * frames, channels, height, width)
+        else:
+            batch, height, width, channels = image_tensor.shape
+            frames = 1
+            working = image_tensor.permute(0, 3, 1, 2)
+
+        base_dtype = torch.float32
+        base_y, base_x = _normalized_meshgrid(height, width, device, base_dtype)
+        result = torch.empty_like(working)
+
+        center_spread = max(0.0, min(center_spread, 1.0))
+        mix = max(0.0, min(mix, 1.0))
+        bias_threshold = max(0.0, min(1.0, (direction_bias + 1.0) * 0.5))
+        vortex_count = max(1, int(vortices))
+        channel_fraction = max(0.0, min(1.0, channel_fraction))
+
+        cpu_generator = torch.Generator(device="cpu").manual_seed(seed)
+
+        total = working.shape[0]
+
+        for idx in range(total):
+            if channel_fraction <= 0.0:
+                result[idx] = working[idx]
+                continue
+
+            channel_count = working.shape[1]
+            selected_count = min(
+                channel_count,
+                max(1, math.ceil(channel_count * channel_fraction))
+            )
+
+            channel_indices = torch.randperm(channel_count, generator=cpu_generator)[:selected_count]
+
+            sample = working[idx:idx + 1]
+            sample_result = sample.clone()
+
+            if channel_mode == "global":
+                rand_vals = torch.rand((vortex_count, 3), generator=cpu_generator)
+                vortex_params = []
+
+                for vortex_idx in range(vortex_count):
+                    offsets = (rand_vals[vortex_idx, :2] * 2.0 - 1.0) * center_spread
+                    center_y = offsets[0].item()
+                    center_x = offsets[1].item()
+                    direction = 1.0 if rand_vals[vortex_idx, 2].item() < bias_threshold else -1.0
+                    vortex_params.append((center_x, center_y, float(strength), float(radius), direction))
+
+                grid = _swirl_grid(base_y, base_x, vortex_params).unsqueeze(0)
+                warped = F.grid_sample(
+                    sample.to(base_dtype),
+                    grid,
+                    mode="bilinear",
+                    padding_mode="reflection",
+                    align_corners=True,
+                ).to(sample.dtype)
+
+                if mix >= 1.0:
+                    sample_result[:, channel_indices] = warped[:, channel_indices]
+                else:
+                    delta = warped[:, channel_indices] - sample[:, channel_indices]
+                    sample_result[:, channel_indices] = sample[:, channel_indices] + delta * mix
+
+            else:  # per_channel
+                for channel_idx in channel_indices.tolist():
+                    rand_vals = torch.rand((vortex_count, 3), generator=cpu_generator)
+                    vortex_params = []
+
+                    for vortex_idx in range(vortex_count):
+                        offsets = (rand_vals[vortex_idx, :2] * 2.0 - 1.0) * center_spread
+                        center_y = offsets[0].item()
+                        center_x = offsets[1].item()
+                        direction = 1.0 if rand_vals[vortex_idx, 2].item() < bias_threshold else -1.0
+                        vortex_params.append((center_x, center_y, float(strength), float(radius), direction))
+
+                    grid = _swirl_grid(base_y, base_x, vortex_params).unsqueeze(0)
+
+                    channel_slice = sample[:, channel_idx:channel_idx + 1].to(base_dtype)
+                    warped_channel = F.grid_sample(
+                        channel_slice,
+                        grid,
+                        mode="bilinear",
+                        padding_mode="reflection",
+                        align_corners=True,
+                    ).to(sample.dtype)
+
+                    if mix >= 1.0:
+                        sample_result[:, channel_idx:channel_idx + 1] = warped_channel
+                    else:
+                        delta = warped_channel - sample[:, channel_idx:channel_idx + 1]
+                        sample_result[:, channel_idx:channel_idx + 1] = sample[:, channel_idx:channel_idx + 1] + delta * mix
+
+            result[idx] = sample_result[0]
+
+        if is_video:
+            result = result.reshape(batch, frames, channels, height, width).permute(0, 1, 3, 4, 2)
+        else:
+            result = result.permute(0, 2, 3, 1)
+
+        return (result.cpu(),)
+
 
 class LatentForwardDiffusion:
     """
@@ -1787,6 +2339,13 @@ NODE_CLASS_MAPPINGS = {
     "LatentReactionDiffusion": LatentReactionDiffusion,
     "LatentFractalBrownianMotion": LatentFractalBrownianMotion,
     "LatentSwirlNoise": LatentSwirlNoise,
+    "ImageAddNoise": ImageAddNoise,
+    "ImagePerlinFractalNoise": ImagePerlinFractalNoise,
+    "ImageSimplexNoise": ImageSimplexNoise,
+    "ImageWorleyNoise": ImageWorleyNoise,
+    "ImageReactionDiffusion": ImageReactionDiffusion,
+    "ImageFractalBrownianMotion": ImageFractalBrownianMotion,
+    "ImageSwirlNoise": ImageSwirlNoise,
     "LatentForwardDiffusion": LatentForwardDiffusion,
     "LatentHybridInverter": LatentHybridInverter,
     "ConditioningAddNoise": ConditioningAddNoise,
@@ -1807,6 +2366,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentReactionDiffusion": "Latent Reaction-Diffusion",
     "LatentFractalBrownianMotion": "Latent Fractal Brownian Motion",
     "LatentSwirlNoise": "Latent Swirl Noise",
+    "ImageAddNoise": "Add Image Noise (Seeded)",
+    "ImagePerlinFractalNoise": "Image Perlin Fractal Noise",
+    "ImageSimplexNoise": "Image Simplex Noise",
+    "ImageWorleyNoise": "Image Worley Noise",
+    "ImageReactionDiffusion": "Image Reaction-Diffusion",
+    "ImageFractalBrownianMotion": "Image Fractal Brownian Motion",
+    "ImageSwirlNoise": "Image Swirl Noise",
     "LatentForwardDiffusion": "Forward Diffusion (Add Scheduled Noise)",
     "LatentHybridInverter": "Latent Hybrid Inverter (Qwen)",
     "ConditioningAddNoise": "Conditioning (Add Noise)",
