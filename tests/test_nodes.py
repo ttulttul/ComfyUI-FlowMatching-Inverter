@@ -20,13 +20,24 @@ def load_module():
     return module
 
 
-def make_flow_matching_latent(batch_size=1, width=FLOW_MATCHING_WIDTH, height=FLOW_MATCHING_HEIGHT):
-    samples = torch.randn(batch_size, FLOW_MATCHING_CHANNELS, FLOW_MATCHING_TEMPORAL, width, height)
+def make_flow_matching_latent(
+    batch_size=1,
+    temporal=FLOW_MATCHING_TEMPORAL,
+    width=FLOW_MATCHING_WIDTH,
+    height=FLOW_MATCHING_HEIGHT,
+):
+    samples = torch.randn(batch_size, FLOW_MATCHING_CHANNELS, temporal, width, height)
     return {"samples": samples}
 
 
-def assert_flow_matching_shape(tensor, batch_size=1, width=FLOW_MATCHING_WIDTH, height=FLOW_MATCHING_HEIGHT):
-    expected = (batch_size, FLOW_MATCHING_CHANNELS, FLOW_MATCHING_TEMPORAL, width, height)
+def assert_flow_matching_shape(
+    tensor,
+    batch_size=1,
+    temporal=FLOW_MATCHING_TEMPORAL,
+    width=FLOW_MATCHING_WIDTH,
+    height=FLOW_MATCHING_HEIGHT,
+):
+    expected = (batch_size, FLOW_MATCHING_CHANNELS, temporal, width, height)
     assert tensor.shape == expected
 
 
@@ -56,6 +67,30 @@ def test_latent_gaussian_blur_rejects_rank2_tensor():
 
     with pytest.raises((RuntimeError, IndexError)):
         node.blur_latent(malformed, sigma=1.0, blur_mode="Spatial Only")
+
+
+def test_latent_gaussian_blur_zero_sigma_returns_original_object():
+    module = load_module()
+    node = module.LatentGaussianBlur()
+    latent = make_flow_matching_latent()
+
+    (result,) = node.blur_latent(latent, sigma=0.0, blur_mode="Spatial Only")
+
+    assert result is latent
+
+
+def test_latent_gaussian_blur_handles_video_latent():
+    module = load_module()
+    node = module.LatentGaussianBlur()
+    video = make_flow_matching_latent(temporal=3, width=4, height=4)
+
+    (result,) = node.blur_latent(video, sigma=1.0, blur_mode="Spatial Only")
+
+    original = video["samples"]
+    blurred = result["samples"]
+
+    assert_flow_matching_shape(blurred, temporal=3, width=4, height=4)
+    assert not torch.allclose(blurred, original)
 
 
 def test_latent_add_noise_reproducible_with_seed():
@@ -116,6 +151,20 @@ def test_latent_add_noise_rejects_integer_latent():
         node.add_noise(latent, seed=0, strength=1.0)
 
 
+def test_latent_frequency_split_zero_sigma_returns_zero_high_pass():
+    module = load_module()
+    node = module.LatentFrequencySplit()
+    constant = torch.ones(1, FLOW_MATCHING_CHANNELS, FLOW_MATCHING_TEMPORAL, 4, 4)
+    latent = make_latent_from_tensor(constant)
+
+    low, high = node.split(latent, sigma=0.0)
+
+    assert_flow_matching_shape(low["samples"], width=4, height=4)
+    assert_flow_matching_shape(high["samples"], width=4, height=4)
+    assert torch.allclose(low["samples"], constant)
+    assert torch.allclose(high["samples"], torch.zeros_like(constant))
+
+
 def test_perlin_noise_strength_affects_latent():
     module = load_module()
     node = module.LatentPerlinFractalNoise()
@@ -156,6 +205,29 @@ def test_perlin_noise_negative_strength_inverts_delta():
     negative_delta = negative["samples"] - latent["samples"]
 
     assert torch.allclose(negative_delta, -positive_delta, atol=1e-6)
+
+
+def test_perlin_noise_per_channel_channels_diverge():
+    module = load_module()
+    node = module.LatentPerlinFractalNoise()
+    latent_tensor = torch.randn(1, 4, 1, 8, 8)
+    latent = make_latent_from_tensor(latent_tensor.clone())
+
+    (result,) = node.add_perlin_noise(
+        latent,
+        seed=3,
+        frequency=1.5,
+        octaves=2,
+        persistence=0.4,
+        lacunarity=2.0,
+        strength=0.75,
+        channel_mode="per_channel",
+    )
+
+    samples = result["samples"]
+    assert not torch.isnan(samples).any()
+    deltas = samples - latent_tensor
+    assert not torch.allclose(deltas[0, 0], deltas[0, 1])
 
 
 def test_simplex_noise_zero_strength_is_noop():
@@ -201,6 +273,126 @@ def test_simplex_noise_negative_strength_inverts_delta():
     negative_delta = negative["samples"] - latent["samples"]
 
     assert torch.allclose(negative_delta, -positive_delta, atol=1e-6)
+
+
+def test_fbm_noise_zero_strength_returns_original_object():
+    module = load_module()
+    node = module.LatentFractalBrownianMotion()
+    latent = make_flow_matching_latent()
+
+    (result,) = node.add_fbm_noise(
+        latent,
+        seed=0,
+        base_noise="simplex",
+        frequency=1.0,
+        feature_points=8,
+        octaves=2,
+        persistence=0.5,
+        lacunarity=2.0,
+        distance_metric="euclidean",
+        jitter=0.25,
+        strength=0.0,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    assert result is not latent
+    assert torch.allclose(result["samples"], latent["samples"])
+
+
+def test_fbm_noise_with_constant_input_generates_variation():
+    module = load_module()
+    node = module.LatentFractalBrownianMotion()
+    latent = make_latent_from_tensor(torch.zeros(1, 4, 1, 10, 10))
+
+    (result,) = node.add_fbm_noise(
+        latent,
+        seed=1,
+        base_noise="perlin",
+        frequency=1.5,
+        feature_points=4,
+        octaves=3,
+        persistence=0.45,
+        lacunarity=2.2,
+        distance_metric="euclidean",
+        jitter=0.1,
+        strength=0.8,
+        channel_mode="per_channel",
+        temporal_mode="locked",
+    )
+
+    delta = result["samples"] - latent["samples"]
+    assert not torch.allclose(delta, torch.zeros_like(delta))
+
+
+def test_fbm_noise_animated_temporal_frames_differ():
+    module = load_module()
+    node = module.LatentFractalBrownianMotion()
+    latent = make_flow_matching_latent(temporal=2, width=6, height=6)
+
+    (result,) = node.add_fbm_noise(
+        latent,
+        seed=7,
+        base_noise="simplex",
+        frequency=1.0,
+        feature_points=8,
+        octaves=2,
+        persistence=0.6,
+        lacunarity=2.0,
+        distance_metric="euclidean",
+        jitter=0.3,
+        strength=0.9,
+        channel_mode="shared",
+        temporal_mode="animated",
+    )
+
+    samples = result["samples"]
+    assert not torch.allclose(samples[0, :, 0], samples[0, :, 1])
+
+
+def test_reaction_diffusion_per_channel_channels_diverge():
+    module = load_module()
+    node = module.LatentReactionDiffusion()
+    latent = make_latent_from_tensor(torch.zeros(1, 3, 1, 12, 12))
+
+    (result,) = node.add_reaction_diffusion(
+        latent,
+        seed=5,
+        iterations=5,
+        feed_rate=0.03,
+        kill_rate=0.058,
+        diffusion_u=0.16,
+        diffusion_v=0.08,
+        time_step=1.0,
+        strength=1.0,
+        channel_mode="per_channel",
+        temporal_mode="locked",
+    )
+
+    samples = result["samples"]
+    assert not torch.isnan(samples).any()
+    assert not torch.allclose(samples[0, 0], samples[0, 1])
+
+
+def test_swirl_noise_channel_fraction_zero_is_noop():
+    module = load_module()
+    node = module.LatentSwirlNoise()
+    latent = make_flow_matching_latent(width=6, height=6)
+
+    (result,) = node.add_swirl_noise(
+        latent,
+        seed=9,
+        vortices=3,
+        channel_mode="global",
+        channel_fraction=0.0,
+        strength=1.0,
+        radius=0.5,
+        center_spread=0.25,
+        direction_bias=0.0,
+        mix=1.0,
+    )
+
+    assert torch.allclose(result["samples"], latent["samples"])
 
 
 def test_conditioning_nodes_modify_embeddings_and_metadata():
@@ -255,3 +447,41 @@ def test_conditioning_add_noise_leaves_non_tensor_entries_untouched():
 
     assert result[0][0] == "not a tensor"
     assert result[0][1]["pooled_output"] == "still not a tensor"
+
+
+def test_conditioning_gaussian_blur_zero_sigma_returns_original_list():
+    module = load_module()
+    node = module.ConditioningGaussianBlur()
+
+    embedding = torch.randn(2, 4, 6)
+    pooled = torch.randn(6)
+    conditioning = [[embedding.clone(), {"pooled_output": pooled.clone()}]]
+
+    (result,) = node.blur(conditioning, sigma=0.0)
+
+    assert result is conditioning
+
+
+def test_conditioning_frequency_split_handles_non_tensor_entries():
+    module = load_module()
+    node = module.ConditioningFrequencySplit()
+
+    conditioning = [["prompt", {"pooled_output": "meta"}]]
+
+    low, high = node.split(conditioning, sigma=0.5)
+
+    assert low[0][0] == "prompt"
+    assert high[0][0] == "prompt"
+    assert low[0][1]["pooled_output"] == "meta"
+    assert high[0][1]["pooled_output"] == "meta"
+
+
+def test_conditioning_frequency_merge_mismatched_lengths_raises():
+    module = load_module()
+    node = module.ConditioningFrequencyMerge()
+
+    low_pass = [[torch.zeros(2, 3), {}]]
+    high_pass = [[torch.zeros(2, 3), {}], [torch.zeros(2, 3), {}]]
+
+    with pytest.raises(ValueError):
+        node.merge(low_pass, high_pass, low_gain=1.0, high_gain=1.0)
