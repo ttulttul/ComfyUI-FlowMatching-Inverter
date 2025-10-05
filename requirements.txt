@@ -1,7 +1,6 @@
-# ComfyUI custom node — no extra pip dependencies required.
-# Uses only Python stdlib and ComfyUI-bundled libraries (torch, numpy, pillow, safetensors, etc.).
-# Leaving this file without packages avoids clobbering the ComfyUI environment.
-# If you intend to run this module outside ComfyUI, you may need (uncomment as appropriate):
-numpy>=1.24
-pillow>=9.0
-torch>=2.1  # Do NOT include this when running under ComfyUI; ComfyUI manages torch.
+# Dependencies needed to run the test suite; these dependencies
+# are provided by ComfyUI natively when the node is used within
+# ComfyUI's environment.
+pytest>=8.0.0,<9.0.0
+torch>=2.1.0,<2.3.0
+torchvision>=0.17.0,<0.18.0

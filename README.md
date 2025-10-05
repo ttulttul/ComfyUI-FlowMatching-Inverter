@@ -135,3 +135,17 @@ Check `Examples/Combination Example.png` for a full workflow that combines the i
 
 1. Clone or download this repository into `ComfyUI/custom_nodes/`.
 2. Restart ComfyUI to load the nodes (look under `Qwen/Sampling` and `Latent`).
+
+## Running the tests
+
+The repository ships with a helper script that prepares a virtual environment and
+executes the pytest suite. From the project root run:
+
+```bash
+./run_tests.sh
+```
+
+The script creates (or reuses) a `.venv` folder, installs the dependencies
+from `requirements.txt`, and then launches `pytest`. Pass additional arguments
+to forward them to pytest—for example `./run_tests.sh -k noise` runs only the
+tests whose names include `noise`.
