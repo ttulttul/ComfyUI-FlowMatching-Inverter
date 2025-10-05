@@ -1,4 +1,6 @@
-# Dependencies needed to run the test suite
+# Dependencies needed to run the test suite; these dependencies
+# are provided by ComfyUI natively when the node is used within
+# ComfyUI's environment.
 pytest>=8.0.0,<9.0.0
 torch>=2.1.0,<2.3.0
 torchvision>=0.17.0,<0.18.0
