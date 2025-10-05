@@ -52,6 +52,8 @@ Runs a Gray–Scott reaction-diffusion simulation in latent space to generate se
 
 Wraps any of the base noise primitives (simplex, Perlin, or Worley) in an fBm stack to build rich multi-scale detail. Combine frequency, octaves, persistence, and lacunarity to decide how aggressively the layers accumulate, and pick Worley for cellular fBm, Perlin for smooth ridges, or simplex for organic grain.
 
+Under the hood the node keeps resampling the chosen base noise at higher frequency while shrinking the amplitude (classic fBm). Each octave is normalized before it is added, so persistence becomes a clean gain control instead of inheriting whatever variance the base noise happens to produce. Worley uses the `feature_points` count scaled by frequency to keep the cell density consistent as lacunarity climbs. Once all octaves are summed, the composite field is normalized again, multiplied by the latent's standard deviation, and finally scaled by `strength` before being added back. `channel_mode` decides whether every channel shares the same Brownian field or gets an independent reseeded stack, and `temporal_mode` controls whether video batches reuse the field (`locked`) or generate fresh motion on every frame (`animated`).
+
 ### Latent Swirl Noise
 
 Warps the latent around one or more seeded vortices using `grid_sample`. Choose between a global grid (shared across channels) or per-channel grids, set the fraction of channels to affect, and control vortex count, rotation, falloff radius, centre jitter, and blend to inject painterly whirlpools or gentle twisting motion where you want it.
