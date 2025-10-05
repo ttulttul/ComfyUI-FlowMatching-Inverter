@@ -17,7 +17,7 @@ def load_module():
 def test_latent_gaussian_blur_modifies_values():
     module = load_module()
     node = module.LatentGaussianBlur()
-    latent = {"samples": torch.randn(1, 4, 8, 8)}
+    latent = {"samples": torch.randn(1, 16, 1, 8, 8)}
 
     (result,) = node.blur_latent(latent, sigma=1.5, blur_mode="Spatial Only")
 
@@ -31,7 +31,7 @@ def test_latent_gaussian_blur_modifies_values():
 def test_latent_add_noise_reproducible_with_seed():
     module = load_module()
     node = module.LatentAddNoise()
-    latent = {"samples": torch.randn(1, 4, 8, 8)}
+    latent = {"samples": torch.randn(1, 16, 1, 8, 8)}
 
     (first,) = node.add_noise(latent, seed=123, strength=0.8)
     (second,) = node.add_noise(latent, seed=123, strength=0.8)
@@ -44,7 +44,7 @@ def test_latent_add_noise_reproducible_with_seed():
 def test_perlin_noise_strength_affects_latent():
     module = load_module()
     node = module.LatentPerlinFractalNoise()
-    latent = {"samples": torch.randn(1, 4, 8, 8)}
+    latent = {"samples": torch.randn(1, 16, 1, 8, 8)}
 
     (result,) = node.add_perlin_noise(
         latent,
@@ -63,7 +63,7 @@ def test_perlin_noise_strength_affects_latent():
 def test_simplex_noise_zero_strength_is_noop():
     module = load_module()
     node = module.LatentSimplexNoise()
-    latent = {"samples": torch.randn(1, 4, 8, 8)}
+    latent = {"samples": torch.randn(1, 16, 1, 8, 8)}
 
     (result,) = node.add_simplex_noise(
         latent,
