@@ -34,6 +34,10 @@ def make_latent_from_tensor(tensor):
     return {"samples": tensor}
 
 
+def make_image(batch_size=1, height=32, width=32, channels=3):
+    return torch.rand(batch_size, height, width, channels)
+
+
 def test_latent_gaussian_blur_modifies_values():
     module = load_module()
     node = module.LatentGaussianBlur()
@@ -201,6 +205,184 @@ def test_simplex_noise_negative_strength_inverts_delta():
     negative_delta = negative["samples"] - latent["samples"]
 
     assert torch.allclose(negative_delta, -positive_delta, atol=1e-6)
+
+
+def test_image_add_noise_reproducible_with_seed():
+    module = load_module()
+    node = module.ImageAddNoise()
+    image = make_image()
+
+    (first,) = node.add_noise(image, seed=123, strength=0.8)
+    (second,) = node.add_noise(image, seed=123, strength=0.8)
+    (third,) = node.add_noise(image, seed=321, strength=0.8)
+
+    assert first.shape == image.shape
+    assert torch.allclose(first, second)
+    assert not torch.allclose(first, third)
+
+
+def test_image_add_noise_zero_variance_is_stable():
+    module = load_module()
+    node = module.ImageAddNoise()
+    image = torch.zeros(1, 16, 16, 3)
+
+    (result,) = node.add_noise(image, seed=0, strength=10.0)
+
+    assert torch.allclose(result, image)
+
+
+def test_image_perlin_noise_strength_affects_image():
+    module = load_module()
+    node = module.ImagePerlinFractalNoise()
+    image = make_image()
+
+    (result,) = node.add_perlin_noise(
+        image,
+        seed=7,
+        frequency=1.5,
+        octaves=2,
+        persistence=0.5,
+        lacunarity=2.0,
+        strength=0.5,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    assert result.shape == image.shape
+    assert not torch.allclose(result, image)
+
+
+def test_image_simplex_noise_zero_strength_is_noop():
+    module = load_module()
+    node = module.ImageSimplexNoise()
+    image = make_image()
+
+    (result,) = node.add_simplex_noise(
+        image,
+        seed=11,
+        frequency=1.0,
+        octaves=2,
+        persistence=0.5,
+        lacunarity=2.0,
+        strength=0.0,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    assert torch.allclose(result, image)
+
+
+def test_image_worley_noise_negative_strength_inverts_delta():
+    module = load_module()
+    node = module.ImageWorleyNoise()
+    image = make_image()
+
+    kwargs = dict(
+        seed=19,
+        feature_points=8,
+        octaves=2,
+        persistence=0.6,
+        lacunarity=2.0,
+        distance_metric="manhattan",
+        jitter=0.25,
+        channel_mode="per_channel",
+        temporal_mode="locked",
+    )
+
+    (positive,) = node.add_worley_noise(image, strength=0.5, **kwargs)
+    (negative,) = node.add_worley_noise(image, strength=-0.5, **kwargs)
+
+    positive_delta = positive - image
+    negative_delta = negative - image
+
+    assert torch.allclose(negative_delta, -positive_delta, atol=1e-6)
+
+
+def test_image_reaction_diffusion_changes_image():
+    module = load_module()
+    node = module.ImageReactionDiffusion()
+    image = make_image(height=24, width=24)
+
+    (result,) = node.add_reaction_diffusion(
+        image,
+        seed=0,
+        iterations=20,
+        feed_rate=0.037,
+        kill_rate=0.065,
+        diffusion_u=0.16,
+        diffusion_v=0.08,
+        time_step=1.0,
+        strength=0.8,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    assert result.shape == image.shape
+    assert not torch.allclose(result, image)
+
+
+def test_image_fractal_brownian_motion_respects_base_noise():
+    module = load_module()
+    node = module.ImageFractalBrownianMotion()
+    image = make_image()
+
+    (simplex,) = node.add_fbm_noise(
+        image,
+        seed=3,
+        base_noise="simplex",
+        frequency=2.0,
+        feature_points=12,
+        octaves=3,
+        persistence=0.5,
+        lacunarity=2.0,
+        distance_metric="euclidean",
+        jitter=0.3,
+        strength=0.5,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    (worley,) = node.add_fbm_noise(
+        image,
+        seed=3,
+        base_noise="worley",
+        frequency=1.5,
+        feature_points=12,
+        octaves=3,
+        persistence=0.5,
+        lacunarity=2.0,
+        distance_metric="euclidean",
+        jitter=0.3,
+        strength=0.5,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    assert simplex.shape == image.shape
+    assert worley.shape == image.shape
+    assert not torch.allclose(simplex, worley)
+
+
+def test_image_swirl_noise_modifies_pixels():
+    module = load_module()
+    node = module.ImageSwirlNoise()
+    image = make_image()
+
+    (result,) = node.add_swirl_noise(
+        image,
+        seed=42,
+        vortices=2,
+        channel_mode="global",
+        channel_fraction=1.0,
+        strength=0.5,
+        radius=0.5,
+        center_spread=0.3,
+        direction_bias=0.0,
+        mix=1.0,
+    )
+
+    assert result.shape == image.shape
+    assert not torch.allclose(result, image)
 
 
 def test_conditioning_nodes_modify_embeddings_and_metadata():
