@@ -359,12 +359,13 @@ def _fractal_simplex(size, seed, frequency, octaves, persistence, lacunarity, de
     return total
 
 
-def _worley_noise(size, seed, feature_points, metric, jitter, device):
+def _worley_noise(size, seed, feature_points, metric, jitter, device, *, chunk_capacity=None, progress=None, progress_offset=0, progress_total=None):
     if len(size) != 2:
         raise ValueError("Worley noise expects a 2D shape")
 
     height, width = size
     dtype = torch.float32
+    feature_points = max(1, int(feature_points))
     cpu_gen = torch.Generator(device="cpu").manual_seed(seed)
     points = torch.rand((feature_points, 2), generator=cpu_gen, dtype=dtype)
 
@@ -378,19 +379,42 @@ def _worley_noise(size, seed, feature_points, metric, jitter, device):
     xs = torch.linspace(0.0, 1.0, steps=width, device=device, dtype=dtype)
     grid_y = ys.view(height, 1).expand(height, width)
     grid_x = xs.view(1, width).expand(height, width)
+    grid = torch.stack((grid_x, grid_y), dim=-1).unsqueeze(2)
 
-    grid = torch.stack((grid_x, grid_y), dim=-1)
-    point_offsets = points.view(1, 1, feature_points, 2)
-    diff = grid.unsqueeze(2) - point_offsets
-
-    if metric == "manhattan":
-        distances = diff.abs().sum(dim=-1)
-    elif metric == "chebyshev":
-        distances = diff.abs().max(dim=-1).values
+    if chunk_capacity is None:
+        chunk_capacity = _worley_chunk_capacity(height, width)
     else:
-        distances = torch.sqrt((diff * diff).sum(dim=-1))
+        chunk_capacity = max(1, int(chunk_capacity))
+    chunk_size = _worley_chunk_size(feature_points, chunk_capacity)
+    total_chunks = max(1, math.ceil(feature_points / chunk_size))
+    effective_total = progress_total if progress_total is not None else progress_offset + total_chunks
 
-    min_dist = distances.min(dim=-1).values
+    min_dist = None
+
+    for chunk_index, start in enumerate(range(0, feature_points, chunk_size)):
+        chunk = points[start:start + chunk_size]
+        diff = grid - chunk.view(1, 1, -1, 2)
+
+        if metric == "manhattan":
+            distances = diff.abs().sum(dim=-1)
+        elif metric == "chebyshev":
+            distances = diff.abs().max(dim=-1).values
+        else:
+            distances = torch.sqrt((diff * diff).sum(dim=-1))
+
+        chunk_min = distances.min(dim=-1).values
+        if min_dist is None:
+            min_dist = chunk_min
+        else:
+            min_dist = torch.minimum(min_dist, chunk_min)
+
+        if progress is not None:
+            absolute = progress_offset + chunk_index + 1
+            progress.update_absolute(absolute, total=effective_total)
+
+    if min_dist is None:
+        min_dist = torch.zeros((height, width), dtype=dtype, device=device)
+
     max_dist = torch.max(min_dist)
     if max_dist > 0:
         min_dist = min_dist / max_dist
@@ -398,25 +422,77 @@ def _worley_noise(size, seed, feature_points, metric, jitter, device):
     return 1.0 - min_dist
 
 
-def _fractal_worley(size, seed, base_points, octaves, persistence, lacunarity, metric, jitter, device):
+_WORLEY_MAX_CHUNK_ELEMENTS = 4_194_304
+
+def _worley_chunk_capacity(height, width):
+    pixels = max(1, height * width)
+    return max(1, _WORLEY_MAX_CHUNK_ELEMENTS // pixels)
+
+def _worley_chunk_size(feature_points, chunk_capacity):
+    feature_points = max(1, int(feature_points))
+    chunk_capacity = max(1, int(chunk_capacity))
+    return max(1, min(feature_points, chunk_capacity))
+
+def _worley_progress_steps(size, base_points, octaves, lacunarity):
+    height, width = size
+    chunk_capacity = _worley_chunk_capacity(height, width)
+    total = 0
+    points = float(base_points)
+    for _ in range(octaves):
+        octave_points = max(1, int(round(points)))
+        chunk_size = _worley_chunk_size(octave_points, chunk_capacity)
+        total += math.ceil(octave_points / chunk_size)
+        points *= lacunarity
+    return max(1, total)
+
+
+
+def _fractal_worley(size, seed, base_points, octaves, persistence, lacunarity, metric, jitter, device, *, progress=None, progress_state=None, progress_total=None):
     dtype = torch.float32
     total = torch.zeros(size, dtype=dtype, device=device)
     amplitude = 1.0
     max_amplitude = 0.0
-    points = base_points
+    points = float(base_points)
+
+    height, width = size
+    chunk_capacity = _worley_chunk_capacity(height, width)
+    progress_cursor = 0
+    if progress_state is not None:
+        progress_cursor = int(progress_state.get("current", 0))
 
     for octave in range(octaves):
         octave_points = max(1, int(round(points)))
-        noise = _worley_noise(size, seed + octave, octave_points, metric, jitter, device)
+        chunk_size = _worley_chunk_size(octave_points, chunk_capacity)
+        chunk_count = max(1, math.ceil(octave_points / chunk_size))
+        effective_total = progress_total if progress_total is not None else progress_cursor + chunk_count
+
+        noise = _worley_noise(
+            size,
+            seed + octave,
+            octave_points,
+            metric,
+            jitter,
+            device,
+            chunk_capacity=chunk_capacity,
+            progress=progress,
+            progress_offset=progress_cursor,
+            progress_total=effective_total,
+        )
         total = total + noise * amplitude
         max_amplitude += amplitude
         amplitude *= persistence
         points *= lacunarity
 
+        progress_cursor += chunk_count
+
+    if progress_state is not None:
+        progress_state["current"] = progress_cursor
+
     if max_amplitude > 0:
         total = total / max_amplitude
 
     return total * 2.0 - 1.0
+
 
 
 def _gray_scott_pattern(size, seed, steps, feed, kill, diff_u, diff_v, dt, device):
@@ -463,6 +539,19 @@ def _gray_scott_pattern(size, seed, steps, feed, kill, diff_u, diff_v, dt, devic
 
     pattern = V.squeeze(0).squeeze(0)
     return _normalize_noise_tensor(pattern)
+
+
+def _count_noise_calls(batch, channels, frames, channel_mode, temporal_mode):
+    if channel_mode == "shared":
+        if frames > 1 and temporal_mode == "animated":
+            per_sample = frames
+        else:
+            per_sample = 1
+    else:
+        per_sample = channels
+        if frames > 1 and temporal_mode == "animated":
+            per_sample *= frames
+    return batch * per_sample
 
 
 def _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator):
@@ -1356,12 +1445,44 @@ class LatentWorleyNoise:
         latent_tensor = latent["samples"].clone().to(device)
 
         base_points = float(max(1, feature_points))
-        generator = lambda size, noise_seed: _fractal_worley(size, noise_seed, base_points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+        progress_bar = None
+        progress_state = None
+        progress_total = None
+
+        if strength != 0.0:
+            if latent_tensor.dim() == 5:
+                batch, channels, frames, height, width = latent_tensor.shape
+            else:
+                batch, channels, height, width = latent_tensor.shape
+                frames = 1
+            steps_per_call = _worley_progress_steps((height, width), base_points, octaves, lacunarity)
+            total_calls = _count_noise_calls(batch, channels, frames, channel_mode, temporal_mode)
+            progress_total = max(1, steps_per_call * max(1, total_calls))
+            progress_bar = comfy.utils.ProgressBar(progress_total)
+            progress_state = {"current": 0}
+
+        def generator(size, noise_seed):
+            return _fractal_worley(
+                size,
+                noise_seed,
+                base_points,
+                octaves,
+                persistence,
+                lacunarity,
+                distance_metric,
+                jitter,
+                device,
+                progress=progress_bar,
+                progress_state=progress_state,
+                progress_total=progress_total,
+            )
+
         output = _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator)
 
         out = latent.copy()
         out["samples"] = output.cpu()
         return (out,)
+
 
 
 class ImageWorleyNoise:
@@ -1394,10 +1515,42 @@ class ImageWorleyNoise:
         image_tensor = image.clone().to(device)
 
         base_points = float(max(1, feature_points))
-        generator = lambda size, noise_seed: _fractal_worley(size, noise_seed, base_points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+        progress_bar = None
+        progress_state = None
+        progress_total = None
+
+        if strength != 0.0:
+            if image_tensor.dim() == 5:
+                batch, frames, height, width, channels = image_tensor.shape
+            else:
+                batch, height, width, channels = image_tensor.shape
+                frames = 1
+            steps_per_call = _worley_progress_steps((height, width), base_points, octaves, lacunarity)
+            total_calls = _count_noise_calls(batch, channels, frames, channel_mode, temporal_mode)
+            progress_total = max(1, steps_per_call * max(1, total_calls))
+            progress_bar = comfy.utils.ProgressBar(progress_total)
+            progress_state = {"current": 0}
+
+        def generator(size, noise_seed):
+            return _fractal_worley(
+                size,
+                noise_seed,
+                base_points,
+                octaves,
+                persistence,
+                lacunarity,
+                distance_metric,
+                jitter,
+                device,
+                progress=progress_bar,
+                progress_state=progress_state,
+                progress_total=progress_total,
+            )
+
         output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
 
         return (output.cpu(),)
+
 
 
 class LatentReactionDiffusion:
@@ -1503,12 +1656,41 @@ class LatentFractalBrownianMotion:
         device = comfy.model_management.get_torch_device()
         latent_tensor = latent["samples"].clone().to(device)
 
+        base_points = float(max(1, feature_points)) * max(frequency, 0.01)
+        progress_bar = None
+        progress_state = None
+        progress_total = None
+
+        if base_noise == "worley" and strength != 0.0:
+            if latent_tensor.dim() == 5:
+                batch, channels, frames, height, width = latent_tensor.shape
+            else:
+                batch, channels, height, width = latent_tensor.shape
+                frames = 1
+            steps_per_call = _worley_progress_steps((height, width), base_points, octaves, lacunarity)
+            total_calls = _count_noise_calls(batch, channels, frames, channel_mode, temporal_mode)
+            progress_total = max(1, steps_per_call * max(1, total_calls))
+            progress_bar = comfy.utils.ProgressBar(progress_total)
+            progress_state = {"current": 0}
+
         def generator(size, noise_seed):
             if base_noise == "perlin":
                 return _fractal_perlin(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
             if base_noise == "worley":
-                points = float(max(1, feature_points)) * max(frequency, 0.01)
-                return _fractal_worley(size, noise_seed, points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+                return _fractal_worley(
+                    size,
+                    noise_seed,
+                    base_points,
+                    octaves,
+                    persistence,
+                    lacunarity,
+                    distance_metric,
+                    jitter,
+                    device,
+                    progress=progress_bar,
+                    progress_state=progress_state,
+                    progress_total=progress_total,
+                )
             return _fractal_simplex(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
 
         output = _apply_2d_noise(latent_tensor, seed, strength, channel_mode, temporal_mode, generator)
@@ -1516,6 +1698,7 @@ class LatentFractalBrownianMotion:
         out = latent.copy()
         out["samples"] = output.cpu()
         return (out,)
+
 
 
 class ImageFractalBrownianMotion:
@@ -1549,17 +1732,47 @@ class ImageFractalBrownianMotion:
         device = comfy.model_management.get_torch_device()
         image_tensor = image.clone().to(device)
 
+        base_points = float(max(1, feature_points)) * max(frequency, 0.01)
+        progress_bar = None
+        progress_state = None
+        progress_total = None
+
+        if base_noise == "worley" and strength != 0.0:
+            if image_tensor.dim() == 5:
+                batch, frames, height, width, channels = image_tensor.shape
+            else:
+                batch, height, width, channels = image_tensor.shape
+                frames = 1
+            steps_per_call = _worley_progress_steps((height, width), base_points, octaves, lacunarity)
+            total_calls = _count_noise_calls(batch, channels, frames, channel_mode, temporal_mode)
+            progress_total = max(1, steps_per_call * max(1, total_calls))
+            progress_bar = comfy.utils.ProgressBar(progress_total)
+            progress_state = {"current": 0}
+
         def generator(size, noise_seed):
             if base_noise == "perlin":
                 return _fractal_perlin(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
             if base_noise == "worley":
-                points = float(max(1, feature_points)) * max(frequency, 0.01)
-                return _fractal_worley(size, noise_seed, points, octaves, persistence, lacunarity, distance_metric, jitter, device)
+                return _fractal_worley(
+                    size,
+                    noise_seed,
+                    base_points,
+                    octaves,
+                    persistence,
+                    lacunarity,
+                    distance_metric,
+                    jitter,
+                    device,
+                    progress=progress_bar,
+                    progress_state=progress_state,
+                    progress_total=progress_total,
+                )
             return _fractal_simplex(size, noise_seed, frequency, octaves, persistence, lacunarity, device)
 
         output = _apply_image_2d_noise(image_tensor, seed, strength, channel_mode, temporal_mode, generator)
 
         return (output.cpu(),)
+
 
 
 class LatentSwirlNoise:
