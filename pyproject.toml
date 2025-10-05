@@ -1,0 +1,23 @@
+[project]
+name = "flowmatching-inverter"
+description = "A set of nodes for reversing the sampling process in flow matching models such as Qwen, plus various latent and conditioning noise nodes"
+version = "1.0.0"
+license = { text = "MIT License" }
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+
+[project.urls]
+Repository = "https://github.com/ttulttul/ComfyUI-FlowMatching-Inverter"
+#  Used by Comfy Registry https://registry.comfy.org
+Documentation = "https://github.com/ttulttul/ComfyUI-FlowMatching-Inverter/wiki"
+"Bug Tracker" = "https://github.com/ttulttul/ComfyUI-FlowMatching-Inverter/issues"
+
+[tool.comfy]
+PublisherId = "ttulttul"
+DisplayName = "ComfyUI-FlowMatching-Inverter"
+Icon = "https://github.com/ttulttul/ComfyUI-FlowMatching-Inverter/raw/refs/heads/main/flowmatching-inverter-icon.png"
+includes = [] 
+# "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
+
