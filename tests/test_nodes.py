@@ -316,6 +316,14 @@ def test_image_perlin_noise_strength_affects_image():
         persistence=0.5,
         lacunarity=2.0,
         strength=0.5,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    assert result.shape == image.shape
+    assert not torch.allclose(result, image)
+
+
 def test_fbm_noise_zero_strength_returns_original_object():
     module = load_module()
     node = module.LatentFractalBrownianMotion()
@@ -337,8 +345,8 @@ def test_fbm_noise_zero_strength_returns_original_object():
         temporal_mode="locked",
     )
 
-    assert result.shape == image.shape
-    assert not torch.allclose(result, image)
+    assert result is not latent
+    assert torch.allclose(result["samples"], latent["samples"])
 
 
 def test_image_simplex_noise_zero_strength_is_noop():
@@ -368,8 +376,23 @@ def test_image_worley_noise_negative_strength_inverts_delta():
 
     kwargs = dict(
         seed=19,
-    assert result is not latent
-    assert torch.allclose(result["samples"], latent["samples"])
+        feature_points=10,
+        octaves=3,
+        persistence=0.5,
+        lacunarity=2.0,
+        distance_metric="euclidean",
+        jitter=0.3,
+        channel_mode="shared",
+        temporal_mode="locked",
+    )
+
+    (positive,) = node.add_worley_noise(image, strength=0.5, **kwargs)
+    (negative,) = node.add_worley_noise(image, strength=-0.5, **kwargs)
+
+    positive_delta = positive - image
+    negative_delta = negative - image
+
+    assert torch.allclose(negative_delta, -positive_delta, atol=1e-6)
 
 
 def test_fbm_noise_with_constant_input_generates_variation():
@@ -414,16 +437,15 @@ def test_fbm_noise_animated_temporal_frames_differ():
         distance_metric="manhattan",
         jitter=0.25,
         channel_mode="per_channel",
-        temporal_mode="locked",
+        strength=0.75,
+        temporal_mode="animated",
     )
 
-    (positive,) = node.add_worley_noise(image, strength=0.5, **kwargs)
-    (negative,) = node.add_worley_noise(image, strength=-0.5, **kwargs)
-
-    positive_delta = positive - image
-    negative_delta = negative - image
-
-    assert torch.allclose(negative_delta, -positive_delta, atol=1e-6)
+    samples = result["samples"]
+    assert samples.shape[2] == 2
+    first_frame = samples[:, :, 0]
+    second_frame = samples[:, :, 1]
+    assert not torch.allclose(first_frame, second_frame)
 
 
 def test_image_reaction_diffusion_changes_image():
@@ -505,15 +527,12 @@ def test_image_swirl_noise_modifies_pixels():
         strength=0.5,
         radius=0.5,
         center_spread=0.3,
-        distance_metric="euclidean",
-        jitter=0.3,
-        strength=0.9,
-        channel_mode="shared",
-        temporal_mode="animated",
+        direction_bias=0.0,
+        mix=1.0,
     )
 
-    samples = result["samples"]
-    assert not torch.allclose(samples[0, :, 0], samples[0, :, 1])
+    assert result.shape == image.shape
+    assert not torch.allclose(result, image)
 
 
 def test_reaction_diffusion_per_channel_channels_diverge():
@@ -558,8 +577,6 @@ def test_swirl_noise_channel_fraction_zero_is_noop():
         mix=1.0,
     )
 
-    assert result.shape == image.shape
-    assert not torch.allclose(result, image)
     assert torch.allclose(result["samples"], latent["samples"])
 
 
