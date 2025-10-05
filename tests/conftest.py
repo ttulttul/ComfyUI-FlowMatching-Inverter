@@ -35,7 +35,7 @@ def _ensure_comfy_stubs():
             self.sigmas = torch.linspace(1.0, 0.0, steps)
 
         def sample(self, *args, **kwargs):
-            return torch.zeros((1, 4, 8, 8), device=self.device)
+            return torch.zeros((1, 16, 1, 8, 8), device=self.device)
 
     samplers_module.KSampler = _DummyKSampler
 
