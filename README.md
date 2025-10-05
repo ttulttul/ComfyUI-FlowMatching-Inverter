@@ -8,6 +8,9 @@ Custom nodes for ComfyUI that target rectified-flow models (for example, Qwen). 
 
 Each node is available on its own, and the hybrid node chains them together for a single-drop workflow.
 
+This node pack also includes a variety of latent and conditioning space noise nodes enabling you to do really
+interesting and insane things in the latent and conditioning space.
+
 ## Conditioning primer
 
 ComfyUI passes prompt information around as a Python list of `[embedding, metadata]` pairs. The `embedding` tensor stores the per-token hidden states produced by the text encoder (shape ≈ `batch × tokens × features`, or `tokens × features` when the batch dimension is implicit). The accompanying `metadata` dictionary carries auxiliary fields—most notably `pooled_output`, a single vector that summarises the whole prompt (CLS token, sentence average, etc.).
