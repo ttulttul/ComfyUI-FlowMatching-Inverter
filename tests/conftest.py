@@ -25,6 +25,19 @@ def _ensure_comfy_stubs():
     utils_module = types.ModuleType("comfy.utils")
     utils_module.ProgressBar = _DummyProgressBar
 
+    class _AnyType(str):
+        def __new__(cls, name="*"):
+            return str.__new__(cls, name)
+
+        def __ne__(self, other):
+            return False
+
+    def _any_type(name="*"):
+        return _AnyType(name)
+
+    utils_module.AnyType = _AnyType
+    utils_module.any_type = _any_type
+
     samplers_module = types.ModuleType("comfy.samplers")
 
     class _DummyKSampler:
